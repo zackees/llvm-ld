@@ -50,6 +50,132 @@ jobs:
       - name: zccache cleanup
         if: always()
         uses: zackees/zccache/action/cleanup@v1.4.0
+  build-linux-cross:
+    runs-on: ubuntu-24.04
+    env:
+      # TODO(#4): pin an exact clang/lld version (checksummed LLVM release tarball or a pinned
+      # apt package version+revision) instead of the distro default. clang-cl/lld-link toolchain
+      # drift between CI runs would silently change the cross-compiled llvm_ld.dll.
+      LLVM_LD_CLANG_VERSION: "18"
+      LLVM_LD_XWIN_VERSION: "0.6.5"
+      # TODO(#4): pin the exact xwin --manifest source (a specific Visual Studio channel manifest
+      # URL/SHA-256) and --sdk-version/--crt-version. Left as a placeholder because the pinned
+      # values must be chosen and recorded in PROVENANCE.md together, not guessed here.
+      LLVM_LD_XWIN_SDK_VERSION: "10.0.22621"
+      LLVM_LD_XWIN_CRT_VERSION: "14.44.17.14"
+      LLVM_LD_XWIN_ROOT: ${{ github.workspace }}/xwin-splat
+    steps:
+      - uses: actions/checkout@v4
+      - uses: zackees/zccache@v1.4.0
+        with:
+          cache-cargo-registry: "false"
+      - name: Install pinned clang/lld
+        run: |
+          # TODO(#4): replace with a checksum-verified download of the pinned LLVM_LD_CLANG_VERSION
+          # release once that version is chosen; apt.llvm.org's install script pins the major
+          # version but not a specific build's checksum.
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- "${LLVM_LD_CLANG_VERSION}"
+          # clang-cl/llvm-lib/llvm-rc ship in clang-tools-N, not llvm.sh's default package set.
+          sudo apt-get install -y "clang-tools-${LLVM_LD_CLANG_VERSION}" "llvm-${LLVM_LD_CLANG_VERSION}"
+          sudo ln -sf "/usr/bin/clang-cl-${LLVM_LD_CLANG_VERSION}" /usr/local/bin/clang-cl
+          sudo ln -sf "/usr/bin/lld-link-${LLVM_LD_CLANG_VERSION}" /usr/local/bin/lld-link
+          sudo ln -sf "/usr/bin/llvm-lib-${LLVM_LD_CLANG_VERSION}" /usr/local/bin/llvm-lib
+          sudo ln -sf "/usr/bin/llvm-rc-${LLVM_LD_CLANG_VERSION}" /usr/local/bin/llvm-rc
+          sudo ln -sf "/usr/bin/llvm-nm-${LLVM_LD_CLANG_VERSION}" /usr/local/bin/llvm-nm
+          clang-cl --version
+      - name: Cache xwin splat
+        id: xwin-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.LLVM_LD_XWIN_ROOT }}
+          key: xwin-${{ env.LLVM_LD_XWIN_VERSION }}-sdk${{ env.LLVM_LD_XWIN_SDK_VERSION }}-crt${{ env.LLVM_LD_XWIN_CRT_VERSION }}
+      - name: Provision xwin splat
+        if: steps.xwin-cache.outputs.cache-hit != 'true'
+        run: |
+          cargo install xwin --version "${LLVM_LD_XWIN_VERSION}" --locked
+          # TODO(#4): pass --manifest <pinned VS channel manifest URL/path> once that manifest and
+          # its SHA-256 are chosen and recorded in PROVENANCE.md; the default manifest floats.
+          xwin --accept-license \
+            --sdk-version "${LLVM_LD_XWIN_SDK_VERSION}" \
+            --crt-version "${LLVM_LD_XWIN_CRT_VERSION}" \
+            splat --output "${LLVM_LD_XWIN_ROOT}"
+      - name: Stage 1 - native llvm-tblgen / llvm-min-tblgen
+        run: |
+          # The pruned payload omits llvm/examples and llvm/benchmarks, and the
+          # standalone llvm configure does not inherit the root CMakeLists cache
+          # settings, so every LLVM_INCLUDE_* guard must be repeated here.
+          cmake -S llvm-project/llvm -B build-tblgen -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_TARGETS_TO_BUILD=X86 \
+            -DLLVM_ENABLE_PROJECTS="" \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_BUILD_TOOLS=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_ENABLE_LIBXML2=OFF -DLLVM_ENABLE_TERMINFO=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=zccache -DCMAKE_CXX_COMPILER_LAUNCHER=zccache
+          cmake --build build-tblgen --target llvm-tblgen llvm-min-tblgen
+      - run: mkdir -p build-cross/.cmake/api/v1/query && touch build-cross/.cmake/api/v1/query/codemodel-v2
+      - name: Stage 2 - cross configure
+        run: |
+          cmake -S . -B build-cross -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE=cmake/WinMsvcCross.cmake \
+            -DLLVM_NATIVE_TOOL_DIR="${{ github.workspace }}/build-tblgen/bin" \
+            -DLLVM_DISABLE_ASSEMBLY_FILES=ON \
+            -DLLVM_ENABLE_PCH=OFF \
+            --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace-cross.jsonl
+      - run: cmake --build build-cross --target llvm_ld abi_smoke abi_contract abi_state_test allocator-probe llvm-ld-runner llvm-ld-direct
+      - name: zccache stats
+        if: always()
+        run: zccache status || true
+      - name: Audit mechanically derived build closure (cross)
+        run: |
+          ninja -C build-cross -t inputs llvm_ld > build-cross-inputs.txt
+          ninja -C build-cross -t deps > build-cross-deps.txt
+          python tools/audit_build.py --source . --build build-cross --ninja-inputs build-cross-inputs.txt --ninja-deps build-cross-deps.txt --cmake-trace cmake-trace-cross.jsonl --expected-llvm-closure provenance/llvm-source-closure.json --output source-closure-linux-cross.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-cross-source-closure
+          path: source-closure-linux-cross.json
+      - name: Export allowlist (llvm-nm on the import library)
+        run: |
+          # llvm-nm against the PE DLL's own symbol table is unreliable (PE export tables are not
+          # a classic symbol table); the import library llvm-lib emits alongside llvm_ld.dll does
+          # carry a symbol table listing exactly the exported names (with __imp_ twins), so that is
+          # the cross equivalent of the Windows job's `dumpbin /exports`.
+          llvm-nm --defined-only --extern-only build-cross/llvm_ld.lib | awk 'NF>=3{print $3}' | sed 's/^__imp_//' | sort -u > actual-exports.txt
+          printf 'llvm_ld_abi_version\nllvm_ld_allocator_get_info\nllvm_ld_invoke\nllvm_ld_profiler_start\nllvm_ld_profiler_stop\n' > expected-exports.txt
+          diff -u expected-exports.txt actual-exports.txt
+      - name: Stage test artifacts
+        run: |
+          mkdir -p stage
+          cp build-cross/llvm_ld.dll stage/
+          cp build-cross/abi_smoke.exe build-cross/abi_contract.exe build-cross/abi_state_test.exe build-cross/allocator-probe.exe stage/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-cross-stage
+          path: stage
+      - name: zccache cleanup
+        if: always()
+        uses: zackees/zccache/action/cleanup@v1.4.0
+  test-windows-cross:
+    needs: build-linux-cross
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-cross-stage
+          path: stage
+      - shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          python tools/verify.py --root .
+          ./tools/run_staged_tests.ps1 -Stage ./stage
   build-windows:
     runs-on: windows-2025
     env:
