@@ -1,0 +1,9 @@
+{
+  global:
+    llvm_ld_abi_version;
+    llvm_ld_allocator_get_info;
+    llvm_ld_profiler_start;
+    llvm_ld_profiler_stop;
+    llvm_ld_invoke;
+  local: *;
+};

@@ -1,0 +1,22 @@
+name: allocator-benchmark
+on:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  allocator-only:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=OFF -DLLVM_LD_ENABLE_DHAT=OFF -DLLVM_LD_BUILD_SYSTEM_BASELINE=ON
+          cmake --build build --target llvm-ld-runner llvm-ld-runner-system allocator-probe allocator-probe-system
+          ./tests/windows_allocator_benchmark.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: allocator-benchmark
+          path: allocator-benchmark.json

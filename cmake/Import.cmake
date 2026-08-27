@@ -1,0 +1,18 @@
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+function(llvm_ld_require_inputs)
+  set(_root "${CMAKE_CURRENT_SOURCE_DIR}/llvm-project")
+  if(NOT EXISTS "${_root}/llvm/CMakeLists.txt")
+    message(FATAL_ERROR "Self-contained pinned LLVM source payload is missing; network fallback is forbidden")
+  endif()
+  set(_mi "${CMAKE_CURRENT_SOURCE_DIR}/upstream/mimalloc-pprof-${LLVM_LD_MIMALLOC_VERSION}/vendor")
+  if(NOT EXISTS "${_mi}/mimalloc-pprof-amalgamated.c")
+    execute_process(COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/import.py" --mimalloc-only
+      WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" RESULT_VARIABLE _result)
+    if(NOT _result EQUAL 0)
+      message(FATAL_ERROR "checksum-verified mimalloc import failed")
+    endif()
+  endif()
+  set(LLVM_LD_LLVM_ROOT "${_root}" PARENT_SCOPE)
+  set(LLVM_LD_MIMALLOC_ROOT "${_mi}" PARENT_SCOPE)
+endfunction()
