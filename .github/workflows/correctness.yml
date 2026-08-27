@@ -30,6 +30,27 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           ./tests/windows_correctness.ps1
           ./tests/windows_bridge_profile.ps1
+      - name: Gold self-host link (byte-identical stock vs wrapper)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          ./tests/gold_link.ps1 -BuildDir build
+      - name: Triage gold link failure
+        if: failure()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          Get-ChildItem gold-*.exe -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
+          $pdbArgs = @()
+          if ((Test-Path gold-stock-1.pdb) -and (Test-Path gold-library-1.pdb)) {
+            $pdbArgs = @('--left-pdb', 'gold-stock-1.pdb', '--right-pdb', 'gold-library-1.pdb')
+          }
+          if ((Test-Path gold-stock-1.exe) -and (Test-Path gold-library-1.exe)) {
+            python tools/pe_triage.py gold-stock-1.exe gold-library-1.exe @pdbArgs
+          } else {
+            Write-Host 'gold-stock-1.exe / gold-library-1.exe not present; failure likely occurred before the stock/library comparison'
+          }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -37,3 +58,10 @@ jobs:
           path: |
             bridge-profile.json
             lld-time-trace.json
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: gold-link-failure-artifacts
+          path: |
+            gold-*.exe
+            gold-*.pdb
