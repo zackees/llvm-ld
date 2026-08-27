@@ -23,6 +23,14 @@ def main() -> int:
     for path in llvm_root.rglob("*"):
         if path.is_file(): actual_llvm[str(path.relative_to(llvm_root)).replace("\\","/")]=hashlib.sha256(path.read_bytes()).hexdigest()
     expected_llvm=llvm_manifest.get("files", {})
+    prune_declaration=json.loads((root/"provenance"/"payload-prune.json").read_text())
+    prune=prune_declaration.get("prune",[]); keep_exceptions=prune_declaration.get("keep_exceptions",[])
+    def kept(relative: str) -> bool:
+        return any(relative==k or relative.startswith(k) for k in keep_exceptions)
+    for p in sorted(actual_llvm):
+        for prefix in prune:
+            if p.startswith(prefix) and not kept(p):
+                raise SystemExit(f"pruned payload path reappeared: {prefix} matched {p}")
     if actual_llvm!=expected_llvm:
         actual_paths=set(actual_llvm); expected_paths=set(expected_llvm)
         extras=sorted(actual_paths-expected_paths)
@@ -33,13 +41,6 @@ def main() -> int:
         for label,paths in (("extra",extras),("missing",missing),("hash-mismatch",changed)):
             if paths: details.append(f"{label} ({len(paths)}): " + ", ".join(paths[:20]))
         raise SystemExit("self-contained LLVM payload differs from locked source closure; " + "; ".join(details))
-    prune_declaration=json.loads((root/"provenance"/"payload-prune.json").read_text())
-    prune=prune_declaration.get("prune",[]); keep_exceptions=prune_declaration.get("keep_exceptions",[])
-    def kept(relative: str) -> bool:
-        return any(relative==k or relative.startswith(k) for k in keep_exceptions)
-    reappeared=sorted(p for p in list(actual_llvm)+list(expected_llvm)
-                       for prefix in prune if p.startswith(prefix) and not kept(p))
-    if reappeared: raise SystemExit(f"pruned payload path reappeared: {sorted(set(reappeared))[:20]}")
     for entry in prune_declaration.get("patched",[]):
         if not (llvm_root/entry["path"]).is_file(): raise SystemExit(f"patched file missing: {entry['path']}")
     inv=root/"provenance"/"mimalloc-pprof-files.json"

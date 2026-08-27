@@ -11,7 +11,12 @@ inputs, licenses, allocator ownership, and the upstream update procedure.
 ## Building
 
 The supported configuration is CMake with the Ninja generator on MSVC. The Visual Studio
-generator is not supported: `llvm/utils/LLVMVisualizers` is pruned from the payload, but the VS
-generator defaults `LLVM_ADD_NATIVE_VISUALIZERS_TO_SOLUTION` to `ON`, so configure fails. The
+generator is not supported: `llvm/utils/LLVMVisualizers` is absent from the vendored closure, but
+the VS generator defaults `LLVM_ADD_NATIVE_VISUALIZERS_TO_SOLUTION` to `ON`, so configure fails. The
 mimalloc-pprof allocator payload is fetched and checksum-verified at first configure, so a
 network-free fresh clone cannot configure.
+
+CI caches the pinned LLVM object compiles with sccache (Windows) / zccache (Linux) since the
+payload is SHA-pinned and identical across PRs. For the same effect locally, pass
+`-DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DCMAKE_C_COMPILER_LAUNCHER=sccache -DLLVM_ENABLE_PCH=OFF`
+to `cmake` (PCH must stay off — sccache does not cache MSVC PCH compiles).

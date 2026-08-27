@@ -34,25 +34,30 @@ def main() -> None:
     if output.exists(): shutil.rmtree(output)
     prune_hits={p:0 for p in prune}
     copied=0
-    for relative,want in sorted(files.items()):
-        rel=pathlib.PurePosixPath(relative)
-        if rel.is_absolute() or ".." in rel.parts: raise SystemExit(f"unsafe manifest path: {relative}")
+    seen=set()
+    for src in sorted(p for p in source.rglob("*") if p.is_file()):
+        rel=src.relative_to(source)
+        if ".." in rel.parts: raise SystemExit(f"unsafe upstream path: {rel}")
+        relative="/".join(rel.parts)
+        if is_pruned(relative,prune,keep_exceptions):
+            for p in prune:
+                if relative.startswith(p): prune_hits[p]+=1
+            continue
+        if relative not in files: continue
+        seen.add(relative)
         dst=output.joinpath(*rel.parts)
         if relative in patched:
             dst.parent.mkdir(parents=True,exist_ok=True); dst.write_bytes(preserved[relative])
             print(f"preserved patched file (not upstream): {relative}")
             continue
-        if is_pruned(relative,prune,keep_exceptions):
-            for p in prune:
-                if relative.startswith(p): prune_hits[p]+=1
-            continue
-        src=source.joinpath(*rel.parts)
-        if not src.is_file(): raise SystemExit(f"missing locked LLVM input: {relative}")
+        want=files[relative]
         actual=hashlib.sha256(src.read_bytes()).hexdigest()
         if actual!=want: raise SystemExit(f"LLVM input drift: {relative}")
         dst.parent.mkdir(parents=True,exist_ok=True); shutil.copyfile(src,dst); copied+=1
+    missing=sorted(set(files)-seen)
+    if missing: raise SystemExit(f"missing locked LLVM input(s): {missing[:20]}")
     for prefix,hits in prune_hits.items():
-        if hits==0: raise SystemExit(f"prune prefix matched nothing in manifest: {prefix}")
+        if hits==0: raise SystemExit(f"prune prefix matched nothing upstream, declaration is stale: {prefix}")
     print(f"materialized {copied} SHA-verified LLVM files into {output}, "
           f"pruned {sum(prune_hits.values())}, preserved {len(patched)} patched files")
 

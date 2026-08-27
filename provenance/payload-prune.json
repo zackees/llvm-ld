@@ -1,5 +1,5 @@
 {
-  "note": "Declares Phase 1 payload-strip intent: which llvm-source-closure.json entries tools/materialize_llvm_payload.py must not restore from upstream, and which retained files this repo deliberately patches away from upstream content. provenance/llvm-source-closure.json remains the sole authority over exact file contents/hashes; this file only records the reviewed prune/patch decisions so the reproducer and tools/verify.py can honour them instead of silently reverting them.",
+  "note": "Declares the reviewed payload-strip decisions: which upstream directories tools/materialize_llvm_payload.py must skip when reproducing the payload from a full checkout of the pinned commit, and which retained files this repo deliberately patches away from upstream content. provenance/llvm-source-closure.json remains the sole authority over exact file contents/hashes; this file records intent, so the reproducer and tools/verify.py honour the prune and patch decisions instead of silently reverting them.",
   "prune": [
     "llvm/tools/",
     "lld/ELF/",
