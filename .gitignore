@@ -2,3 +2,10 @@
 /llvm-project.materialize-tmp/
 /upstream/
 !/upstream/.gitkeep
+
+# tests/gold_link.ps1 and tests/windows_correctness.ps1 leave their comparison outputs in the
+# repo root (correctness.yml's `if: failure()` artifact upload collects them from there), and a
+# gold-*.exe from the self-host link is ~44 MB. They must never be committed.
+/gold-*.exe
+/gold-*.pdb
+/allocator-axis-*.exe

@@ -112,7 +112,12 @@ if (-not $edge.Objects -or $edge.Objects.Count -eq 0) { throw "build.ninja: 'llv
 $collisionRegex = '^(?i)[-/](out|pdb|pdbaltpath|pdbsourcepath|incremental|manifest|brepro|threads|ilk)(:.*)?$'
 $debugRegex = '^(?i)[-/]debug(:.*)?$'
 
-$hasDebug = $false
+# PDB byte-identity is a first-class part of the gold contract, so we ask for /debug ourselves
+# rather than only when the captured edge happens to carry it. Release builds link llvm-ld-direct
+# without /debug, so keying off the edge alone would leave every PDB row below permanently
+# dormant. The objects need not carry full debug info for this to be meaningful: lld still emits
+# a PDB, and the assertion is byte identity between the two linkers, not PDB richness.
+$hasDebug = $true
 foreach ($tok in (@($edge.LinkLibraries) + @($edge.LinkFlags))) {
   if ($tok -match $debugRegex) { $hasDebug = $true }
 }
@@ -163,9 +168,21 @@ if ($machineFlag) { $forcedFlags += $machineFlag }
 $goldOutDir = (New-Item -ItemType Directory -Path (Join-Path $BuildDir 'gold-link-tmp') -Force).FullName
 $goldSrcPath = Join-Path $goldOutDir 'gold-src'
 
+# Every link writes to the SAME constant intermediate name and is renamed to its per-row stem
+# afterwards. This is load-bearing under /debug, not cosmetic: measured with the pinned runner,
+# two otherwise-identical /debug /brepro /pdbaltpath:%_PDB% links that differ only in their
+# /out: and /pdb: names produce a DIFFERENT exe (the CodeView debug directory embeds the PDB
+# basename that %_PDB% expands to) and a DIFFERENT pdb (the '* Linker *' module's S_ENVBLOCK
+# records the /out: path). With per-row names, every comparison below - including the
+# same-thread-count a-vs-b determinism rows - would fail spuriously the moment anyone configures
+# a build whose LINK_FLAGS carry /debug. With a constant intermediate name the same pair is
+# byte-identical. Non-/debug output does not embed either name, which is why the Release path
+# passes either way.
+$goldLinkStem = 'gold'
+
 function Invoke-GoldLink([string]$exePath, [string[]]$extraArgs, [string]$outStem) {
-  $outAbs = Join-Path $goldOutDir "$outStem.exe"
-  $pdbAbs = Join-Path $goldOutDir "$outStem.pdb"
+  $outAbs = Join-Path $goldOutDir "$goldLinkStem.exe"
+  $pdbAbs = Join-Path $goldOutDir "$goldLinkStem.pdb"
   Remove-Item $outAbs, $pdbAbs -ErrorAction SilentlyContinue
   $pdbArgs = @()
   if ($hasDebug) { $pdbArgs = @('/debug', "/pdb:$pdbAbs", '/pdbaltpath:%_PDB%', "/pdbsourcepath:$goldSrcPath") }

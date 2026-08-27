@@ -149,7 +149,27 @@ jobs:
           # a classic symbol table); the import library llvm-lib emits alongside llvm_ld.dll does
           # carry a symbol table listing exactly the exported names (with __imp_ twins), so that is
           # the cross equivalent of the Windows job's `dumpbin /exports`.
-          llvm-nm --defined-only --extern-only build-cross/llvm_ld.lib | awk 'NF>=3{print $3}' | sed 's/^__imp_//' | sort -u > actual-exports.txt
+          #
+          # Every COFF import library also defines three linker-generated boilerplate symbols that
+          # are NOT exports of the DLL and must be filtered out; verified against a real
+          # llvm_ld.lib archive symbol table, whose 13 entries are the 5 exports, their 5 __imp_
+          # twins, and exactly these three:
+          #   __IMPORT_DESCRIPTOR_llvm_ld, __NULL_IMPORT_DESCRIPTOR, \x7fllvm_ld_NULL_THUNK_DATA
+          # The thunk name carries a literal leading 0x7f byte, so it is matched end-anchored
+          # rather than by exact name. The filtering is by boilerplate SHAPE, not by an
+          # `^llvm_ld_` prefix allowlist, so an accidental non-llvm_ld export (e.g. a leaked
+          # mi_malloc) still trips the diff below.
+          #
+          # The awk takes the LAST field guarded by a single-letter nm type code in the
+          # second-to-last field, so it is correct whether llvm-nm emits the 3-column
+          # "<address> <type> <name>" form or the 2-column "<type> <name>" form for short-import
+          # members, and it skips the "archive(member):" header and blank lines (NF<2).
+          llvm-nm --defined-only --extern-only build-cross/llvm_ld.lib \
+            | awk 'NF>=2 && $(NF-1) ~ /^[A-Za-z]$/ {print $NF}' \
+            | sed 's/^__imp_//' \
+            | grep -v -E '^__(IMPORT_DESCRIPTOR_|NULL_IMPORT_DESCRIPTOR$)' \
+            | grep -v -E '_NULL_THUNK_DATA$' \
+            | sort -u > actual-exports.txt
           printf 'llvm_ld_abi_version\nllvm_ld_allocator_get_info\nllvm_ld_invoke\nllvm_ld_profiler_start\nllvm_ld_profiler_stop\n' > expected-exports.txt
           diff -u expected-exports.txt actual-exports.txt
       - name: Stage test artifacts
