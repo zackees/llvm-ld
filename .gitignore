@@ -1,3 +1,4 @@
 /build/
+/llvm-project.materialize-tmp/
 /upstream/
 !/upstream/.gitkeep
