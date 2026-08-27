@@ -5,16 +5,24 @@ on:
 jobs:
   deterministic-coff:
     runs-on: windows-2025
+    env:
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - name: Build library and pinned stock lld
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_BUILD_SYSTEM_BASELINE=ON
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_BUILD_SYSTEM_BASELINE=ON -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DLLVM_ENABLE_PCH=OFF
           cmake --build build --target llvm_ld llvm-ld-runner llvm-ld-runner-system llvm-ld-direct
+      - name: sccache stats
+        if: always()
+        shell: pwsh
+        run: sccache --show-stats
+        continue-on-error: true
       - name: Deterministic EXE/PDB, MSVC/MinGW, LTO, and native execution
         shell: pwsh
         run: |
