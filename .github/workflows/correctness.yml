@@ -1,0 +1,31 @@
+name: correctness
+on:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  deterministic-coff:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Build library and pinned stock lld
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_BUILD_SYSTEM_BASELINE=ON
+          cmake --build build --target llvm_ld llvm-ld-runner llvm-ld-runner-system llvm-ld-direct
+      - name: Deterministic EXE/PDB, MSVC/MinGW, LTO, and native execution
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          ./tests/windows_correctness.ps1
+          ./tests/windows_bridge_profile.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bridge-overhead-and-time-trace
+          path: |
+            bridge-profile.json
+            lld-time-trace.json

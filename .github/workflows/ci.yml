@@ -1,0 +1,75 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  provenance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Undeclared-read negative controls
+        run: python tests/audit_negative_controls.py
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python tools/import.py --mimalloc-only
+      - run: python tools/verify.py --root . --positive-controls
+      - name: Timing configuration cannot enable profiling
+        run: |
+          unset MIMALLOC_DHAT MIMALLOC_DHAT_DUMP_AT_EXIT MIMALLOC_PROF_ACTIVE MI_PPROF
+          cmake -S . -B build-timing -DLLVM_LD_ENABLE_PPROF=OFF -DLLVM_LD_ENABLE_DHAT=OFF
+          ! grep -E 'LLVM_LD_ENABLE_(PPROF|DHAT):BOOL=ON' build-timing/CMakeCache.txt
+  build-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: mkdir -p build/.cmake/api/v1/query && touch build/.cmake/api/v1/query/codemodel-v2
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace.jsonl
+      - run: cmake --build build --target llvm_ld abi_smoke abi_contract abi_state_test allocator-probe llvm-ld-runner llvm-ld-direct
+      - name: Audit mechanically derived build closure
+        run: |
+          ninja -C build -t inputs llvm_ld > build-inputs.txt
+          ninja -C build -t deps > build-deps.txt
+          python tools/audit_build.py --source . --build build --ninja-inputs build-inputs.txt --ninja-deps build-deps.txt --cmake-trace cmake-trace.jsonl --expected-llvm-closure provenance/llvm-source-closure.json --output source-closure.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-source-closure
+          path: source-closure.json
+      - name: Export allowlist
+        run: |
+          nm -D --defined-only --extern-only build/libllvm_ld.so | awk '{print $3}' | sort > actual-exports.txt
+          printf 'llvm_ld_abi_version\nllvm_ld_allocator_get_info\nllvm_ld_invoke\nllvm_ld_profiler_start\nllvm_ld_profiler_stop\n' > expected-exports.txt
+          diff -u expected-exports.txt actual-exports.txt
+      - run: ctest --test-dir build --output-on-failure
+  build-windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          New-Item -ItemType Directory -Force build/.cmake/api/v1/query | Out-Null
+          New-Item -ItemType File -Force build/.cmake/api/v1/query/codemodel-v2 | Out-Null
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=OFF -DLLVM_LD_ENABLE_DHAT=OFF --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace.jsonl
+          cmake --build build --target llvm_ld abi_smoke abi_contract abi_state_test allocator-probe llvm-ld-runner llvm-ld-direct
+          ctest --test-dir build --output-on-failure
+          dumpbin /nologo /exports build/llvm_ld.dll | Select-String 'llvm_ld_(abi_version|allocator_get_info|invoke|profiler_start|profiler_stop)' | ForEach-Object { if ($_ -match 'llvm_ld_[A-Za-z_]+') { $Matches[0] } } | Sort-Object -Unique | Set-Content actual-exports.txt
+          @('llvm_ld_abi_version','llvm_ld_allocator_get_info','llvm_ld_invoke','llvm_ld_profiler_start','llvm_ld_profiler_stop') | Sort-Object | Set-Content expected-exports.txt
+          if (Compare-Object (Get-Content expected-exports.txt) (Get-Content actual-exports.txt)) { throw 'C ABI export allowlist differs' }
+          ninja -C build -t inputs llvm_ld | Set-Content build-inputs.txt
+          ninja -C build -t deps | Set-Content build-deps.txt
+          python tools/audit_build.py --source . --build build --ninja-inputs build-inputs.txt --ninja-deps build-deps.txt --cmake-trace cmake-trace.jsonl --expected-llvm-closure provenance/llvm-source-closure.json --output source-closure.json
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=ON -DLLVM_LD_ENABLE_DHAT=OFF
+          cmake --build build --target llvm_ld allocator-probe
+          ./build/allocator-probe.exe mimalloc-pprof
+          if($LASTEXITCODE){throw 'sampled profiler diagnostic activation failed'}
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=OFF -DLLVM_LD_ENABLE_DHAT=ON
+          cmake --build build --target llvm_ld allocator-probe
+          ./build/allocator-probe.exe mimalloc-dhat
+          if($LASTEXITCODE){throw 'DHAT diagnostic activation failed'}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-source-closure
+          path: source-closure.json

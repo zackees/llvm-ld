@@ -1,0 +1,2 @@
+This distribution contains components under the licenses reproduced in LICENSE-LLVM.txt and
+LICENSE-MIMALLOC.txt. The llvm-ld wrapper itself is licensed Apache-2.0 WITH LLVM-exception.
