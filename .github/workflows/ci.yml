@@ -23,6 +23,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          # payload_reproducer rebuilds an upstream stand-in from the pre-strip
+          # commit, which a shallow clone does not contain.
+          fetch-depth: 0
       - uses: zackees/zccache@v1.4.0
         with:
           cache-cargo-registry: "false"
@@ -182,6 +186,10 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@v4
+        with:
+          # payload_reproducer rebuilds an upstream stand-in from the pre-strip
+          # commit, which a shallow clone does not contain.
+          fetch-depth: 0
       - uses: ilammy/msvc-dev-cmd@v1
       - uses: mozilla-actions/sccache-action@v0.0.11
       - shell: pwsh
