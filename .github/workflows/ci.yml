@@ -1,4 +1,4 @@
-name: ci
+﻿name: ci
 on:
   pull_request:
   push:
@@ -21,24 +21,25 @@ jobs:
           ! grep -E 'LLVM_LD_ENABLE_(PPROF|DHAT):BOOL=ON' build-timing/CMakeCache.txt
   build-linux:
     runs-on: ubuntu-24.04
+    env:
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@v4
         with:
           # payload_reproducer rebuilds an upstream stand-in from the pre-strip
           # commit, which a shallow clone does not contain.
           fetch-depth: 0
-      - uses: zackees/zccache@v1.4.0
-        with:
-          cache-cargo-registry: "false"
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - run: mkdir -p build/.cmake/api/v1/query && touch build/.cmake/api/v1/query/codemodel-v2
       # LLVM_APPEND_VC_REV=OFF everywhere below: with it ON, LLVM stamps the git revision into the
       # generated VCSRevision.h, so every commit changes LLVMSupport and therefore llvm_ld.dll -
       # which defeats byte-identity comparisons across commits and poisons the compiler caches.
-      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_APPEND_VC_REV=OFF -DCMAKE_C_COMPILER_LAUNCHER=zccache -DCMAKE_CXX_COMPILER_LAUNCHER=zccache -DLLVM_ENABLE_PCH=OFF --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace.jsonl
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_APPEND_VC_REV=OFF -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DLLVM_ENABLE_PCH=OFF --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace.jsonl
       - run: cmake --build build --target llvm_ld abi_smoke abi_contract abi_state_test allocator-probe llvm-ld-runner llvm-ld-direct
-      - name: zccache stats
+      - name: sccache stats
         if: always()
-        run: zccache status || true
+        continue-on-error: true
+        run: sccache --show-stats
       - name: Audit mechanically derived build closure
         run: |
           ninja -C build -t inputs llvm_ld > build-inputs.txt
@@ -54,16 +55,17 @@ jobs:
           printf 'llvm_ld_abi_version\nllvm_ld_allocator_get_info\nllvm_ld_invoke\nllvm_ld_profiler_start\nllvm_ld_profiler_stop\n' > expected-exports.txt
           diff -u expected-exports.txt actual-exports.txt
       - run: ctest --test-dir build --output-on-failure
-      - name: zccache cleanup
-        if: always()
-        uses: zackees/zccache/action/cleanup@v1.4.0
   build-linux-cross:
     runs-on: ubuntu-24.04
     env:
+      SCCACHE_GHA_ENABLED: "true"
       # TODO(#4): pin an exact clang/lld version (checksummed LLVM release tarball or a pinned
       # apt package version+revision) instead of the distro default. clang-cl/lld-link toolchain
       # drift between CI runs would silently change the cross-compiled llvm_ld.dll.
-      LLVM_LD_CLANG_VERSION: "18"
+      #
+      # Must stay >= 19: the pinned MSVC CRT's yvals_core.h hard-errors with
+      # "STL1000: Unexpected compiler version, expected Clang 19.0.0 or newer".
+      LLVM_LD_CLANG_VERSION: "20"
       LLVM_LD_XWIN_VERSION: "0.6.5"
       # TODO(#4): pin the exact xwin --manifest source (a specific Visual Studio channel manifest
       # URL/SHA-256) and --sdk-version/--crt-version. Left as a placeholder because the pinned
@@ -73,9 +75,7 @@ jobs:
       LLVM_LD_XWIN_ROOT: ${{ github.workspace }}/xwin-splat
     steps:
       - uses: actions/checkout@v4
-      - uses: zackees/zccache@v1.4.0
-        with:
-          cache-cargo-registry: "false"
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - name: Install pinned clang/lld
         run: |
           # TODO(#4): replace with a checksum-verified download of the pinned LLVM_LD_CLANG_VERSION
@@ -133,7 +133,7 @@ jobs:
             -DLLVM_BUILD_TOOLS=OFF \
             -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF \
             -DLLVM_ENABLE_LIBXML2=OFF -DLLVM_ENABLE_TERMINFO=OFF \
-            -DCMAKE_C_COMPILER_LAUNCHER=zccache -DCMAKE_CXX_COMPILER_LAUNCHER=zccache
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
           cmake --build build-tblgen --target llvm-tblgen llvm-min-tblgen
       - run: mkdir -p build-cross/.cmake/api/v1/query && touch build-cross/.cmake/api/v1/query/codemodel-v2
       - name: Stage 2 - cross configure
@@ -147,9 +147,10 @@ jobs:
             -DLLVM_ENABLE_PCH=OFF \
             --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace-cross.jsonl
       - run: cmake --build build-cross --target llvm_ld abi_smoke abi_contract abi_state_test allocator-probe llvm-ld-runner llvm-ld-direct
-      - name: zccache stats
+      - name: sccache stats
         if: always()
-        run: zccache status || true
+        continue-on-error: true
+        run: sccache --show-stats
       - name: Audit mechanically derived build closure (cross)
         run: |
           ninja -C build-cross -t inputs llvm_ld > build-cross-inputs.txt
@@ -197,9 +198,6 @@ jobs:
         with:
           name: linux-cross-stage
           path: stage
-      - name: zccache cleanup
-        if: always()
-        uses: zackees/zccache/action/cleanup@v1.4.0
   test-windows-cross:
     needs: build-linux-cross
     runs-on: windows-2025
