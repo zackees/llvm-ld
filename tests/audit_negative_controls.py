@@ -50,6 +50,33 @@ class AuditNegativeControls(unittest.TestCase):
             self.assertNotEqual(result.returncode,0)
             self.assertIn(expected,result.stdout+result.stderr)
 
+    def run_vcs_case(self, relative: str) -> tuple[int,str,str]:
+        with tempfile.TemporaryDirectory() as raw:
+            root=pathlib.Path(raw); source=root/"source"; build=root/"build"
+            (source/"llvm-project"/"llvm").mkdir(parents=True)
+            (source/"llvm-project"/"llvm"/"CMakeLists.txt").write_text("# pinned\n")
+            (source/"provenance").mkdir(); (source/"upstream"/"mimalloc-pprof-0.9.5").mkdir(parents=True)
+            (source/"provenance"/"mimalloc-pprof-files.json").write_text("{}")
+            declared=source/"src"/"declared.c"; declared.parent.mkdir(); declared.write_text("int x;\n")
+            vcs=source/relative; vcs.parent.mkdir(parents=True,exist_ok=True); vcs.write_text("ref: refs/heads/main\n")
+            (build/".cmake"/"api"/"v1"/"reply").mkdir(parents=True)
+            (build/".cmake"/"api"/"v1"/"reply"/"codemodel-v2-test.json").write_text("{}")
+            (build/"compile_commands.json").write_text(json.dumps([{"file":str(declared),"directory":str(build)}]))
+            inputs=build/"inputs.txt"; inputs.write_text(f"{vcs}\n")
+            output=build/"out.json"
+            result=subprocess.run([sys.executable,str(AUDIT),"--source",str(source),"--build",str(build),"--ninja-inputs",str(inputs),"--output",str(output)],text=True,capture_output=True)
+            return result.returncode,result.stdout+result.stderr,(output.read_text() if output.is_file() else "")
+
+    def test_vcs_metadata_read_is_exempt(self):
+        code,log,inventory=self.run_vcs_case(".git/logs/HEAD")
+        self.assertEqual(code,0,log)
+        self.assertNotIn(".git",inventory)
+
+    def test_source_shaped_file_under_vcs_dir_is_rejected(self):
+        code,log,_=self.run_vcs_case(".git/evil.h")
+        self.assertNotEqual(code,0)
+        self.assertIn("undeclared build source read",log)
+
     def test_undeclared_ninja_dependency_is_rejected(self):
         self.run_aux_case("deps","undeclared dependency read")
 

@@ -7,8 +7,13 @@ SOURCE_SUFFIXES={".c",".cc",".cpp",".cxx",".h",".hh",".hpp",".inc",".td",".def"}
 def inside(path: pathlib.Path, root: pathlib.Path) -> bool:
     try: path.relative_to(root); return True
     except ValueError: return False
+def looks_like_path(value: str) -> bool:
+    # Conservative pre-filter, not validation: a real read still has to exist on disk and fall
+    # inside a declared root. This only rejects values no filesystem could name, so probing them
+    # raises ENAMETOOLONG instead of answering False.
+    return bool(value) and "\n" not in value and "\x00" not in value and len(value)<=4096
 def main() -> int:
-    p=argparse.ArgumentParser(); p.add_argument("--source",type=pathlib.Path,required=True); p.add_argument("--build",type=pathlib.Path,required=True); p.add_argument("--ninja-inputs",type=pathlib.Path,required=True); p.add_argument("--ninja-deps",type=pathlib.Path); p.add_argument("--output",type=pathlib.Path,required=True); p.add_argument("--cmake-trace",type=pathlib.Path); p.add_argument("--expected-llvm-closure",type=pathlib.Path); a=p.parse_args()
+    p=argparse.ArgumentParser(); p.add_argument("--source",type=pathlib.Path,required=True); p.add_argument("--build",type=pathlib.Path,required=True); p.add_argument("--ninja-inputs",type=pathlib.Path,required=True); p.add_argument("--ninja-deps",type=pathlib.Path); p.add_argument("--output",type=pathlib.Path,required=True); p.add_argument("--cmake-trace",type=pathlib.Path); p.add_argument("--expected-llvm-closure",type=pathlib.Path); p.add_argument("--native-tool-dir",type=pathlib.Path); a=p.parse_args()
     source=a.source.resolve(); build=a.build.resolve()
     commands=json.loads((build/"compile_commands.json").read_text(encoding="utf-8"))
     if not commands: raise SystemExit("empty compile database")
@@ -27,9 +32,24 @@ def main() -> int:
         "cmake":(source/"cmake").resolve(),
         "mimalloc":mimalloc_root,
     }
-    allowed_files={(source/"CMakeLists.txt").resolve()}
+    # A cross build runs TableGen from a separate native stage-1 build tree, so those executables
+    # are read as generator tools. They are build outputs of the same pinned payload, not source.
+    if a.native_tool_dir: allowed["native-tools"]=a.native_tool_dir.resolve()
+    # exports.map is the ELF version script the shared-library link reads directly; it is a
+    # first-party input like CMakeLists.txt, so it is declared and hashed into the inventory
+    # rather than exempted.
+    allowed_files={(source/"CMakeLists.txt").resolve(),(source/"exports.map").resolve()}
+    # LLVM's find_first_existing_vc_file (AddLLVM.cmake) makes this checkout's .git/logs/HEAD a
+    # dependency of the generated VCSRevision.h so the revision stamp refreshes on commit. That is
+    # VCS metadata, not build source: no byte of it is compiled or included, so exempting it does
+    # not weaken the guarantee that every compiled/included byte comes from the pinned LLVM payload
+    # or a declared input. Scoped to this repository's own .git, and only to files that are not
+    # source-shaped - a header stashed under .git and #included would still arrive through the
+    # dependency channel and must still be rejected. Deliberately not added to the inventory.
+    vcs_dir=(source/".git").resolve()
     mimalloc_manifest=json.loads((source/"provenance"/"mimalloc-pprof-files.json").read_text(encoding="utf-8"))
     def record(candidate: pathlib.Path, context: str) -> None:
+        if inside(candidate,vcs_dir) and candidate.suffix.lower() not in SOURCE_SUFFIXES: return
         if candidate in allowed_files:
             inventory[f"project/{candidate.name}"]=hashlib.sha256(candidate.read_bytes()).hexdigest()
             return
@@ -73,11 +93,17 @@ def main() -> int:
             if candidate.is_file() and (inside(candidate,source) or inside(candidate,build)):
                 record(candidate,"CMake trace read")
             for value in entry.get("args",[]):
+                # --trace-expand inlines whole file bodies as arguments (configure_file templates,
+                # multi-line strings). Those are not paths, and probing them raises ENAMETOOLONG
+                # rather than returning False.
+                if not looks_like_path(value): continue
                 candidate=pathlib.Path(value)
                 if not candidate.is_absolute(): candidate=trace_file.parent/candidate
-                try: candidate=candidate.resolve()
+                try:
+                    candidate=candidate.resolve()
+                    if not candidate.is_file(): continue
                 except OSError: continue
-                if candidate.is_file() and (inside(candidate,source) or inside(candidate,build)):
+                if inside(candidate,source) or inside(candidate,build):
                     record(candidate,"CMake argument read")
     reply=build/".cmake"/"api"/"v1"/"reply"
     if not list(reply.glob("codemodel-v2-*.json")): raise SystemExit("CMake file-api codemodel missing")

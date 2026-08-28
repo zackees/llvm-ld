@@ -1,4 +1,4 @@
-name: ci
+﻿name: ci
 on:
   pull_request:
   push:
@@ -21,11 +21,25 @@ jobs:
           ! grep -E 'LLVM_LD_ENABLE_(PPROF|DHAT):BOOL=ON' build-timing/CMakeCache.txt
   build-linux:
     runs-on: ubuntu-24.04
+    env:
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@v4
+        with:
+          # payload_reproducer rebuilds an upstream stand-in from the pre-strip
+          # commit, which a shallow clone does not contain.
+          fetch-depth: 0
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - run: mkdir -p build/.cmake/api/v1/query && touch build/.cmake/api/v1/query/codemodel-v2
-      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace.jsonl
+      # LLVM_APPEND_VC_REV=OFF everywhere below: with it ON, LLVM stamps the git revision into the
+      # generated VCSRevision.h, so every commit changes LLVMSupport and therefore llvm_ld.dll -
+      # which defeats byte-identity comparisons across commits and poisons the compiler caches.
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_APPEND_VC_REV=OFF -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DLLVM_ENABLE_PCH=OFF --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace.jsonl
       - run: cmake --build build --target llvm_ld abi_smoke abi_contract abi_state_test allocator-probe llvm-ld-runner llvm-ld-direct
+      - name: sccache stats
+        if: always()
+        continue-on-error: true
+        run: sccache --show-stats
       - name: Audit mechanically derived build closure
         run: |
           ninja -C build -t inputs llvm_ld > build-inputs.txt
@@ -41,18 +55,198 @@ jobs:
           printf 'llvm_ld_abi_version\nllvm_ld_allocator_get_info\nllvm_ld_invoke\nllvm_ld_profiler_start\nllvm_ld_profiler_stop\n' > expected-exports.txt
           diff -u expected-exports.txt actual-exports.txt
       - run: ctest --test-dir build --output-on-failure
-  build-windows:
+  build-linux-cross:
+    runs-on: ubuntu-24.04
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      # TODO(#4): pin an exact clang/lld version (checksummed LLVM release tarball or a pinned
+      # apt package version+revision) instead of the distro default. clang-cl/lld-link toolchain
+      # drift between CI runs would silently change the cross-compiled llvm_ld.dll.
+      #
+      # Must stay >= 19: the pinned MSVC CRT's yvals_core.h hard-errors with
+      # "STL1000: Unexpected compiler version, expected Clang 19.0.0 or newer".
+      LLVM_LD_CLANG_VERSION: "20"
+      LLVM_LD_XWIN_VERSION: "0.6.5"
+      # TODO(#4): pin the exact xwin --manifest source (a specific Visual Studio channel manifest
+      # URL/SHA-256) and --sdk-version/--crt-version. Left as a placeholder because the pinned
+      # values must be chosen and recorded in PROVENANCE.md together, not guessed here.
+      # Matches the SDK the native build-windows job compiles against. The older 10.0.22621 ucrt
+      # headers omit CRT decoration macros the vendored mimalloc amalgamation uses bare
+      # (_CRT_HYBRIDPATCHABLE, _CRT_NOEXCEPT), so keeping the two paths on one SDK avoids
+      # cross-only header drift. WinMsvcCross.cmake also defines those macros empty as a backstop.
+      LLVM_LD_XWIN_SDK_VERSION: "10.0.26100"
+      LLVM_LD_XWIN_CRT_VERSION: "14.44.17.14"
+    steps:
+      - uses: actions/checkout@v4
+      # LLVM_LD_XWIN_ROOT is set here rather than in the job env because it must live OUTSIDE the
+      # checkout and only $RUNNER_TEMP gives that; the runner context is not available to a
+      # job-level env block. The splat is a toolchain sysroot, exactly like the MSVC install the
+      # native Windows job compiles against, and that one sits outside the source tree so the
+      # closure audit never sees its headers as build source reads. Keeping it inside the workspace
+      # would instead require exempting a directory of headers, which would blunt the audit.
+      - name: Resolve toolchain sysroot location
+        run: echo "LLVM_LD_XWIN_ROOT=$RUNNER_TEMP/xwin-splat" >> "$GITHUB_ENV"
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: Install pinned clang/lld
+        run: |
+          # TODO(#4): replace with a checksum-verified download of the pinned LLVM_LD_CLANG_VERSION
+          # release once that version is chosen; apt.llvm.org's install script pins the major
+          # version but not a specific build's checksum.
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- "${LLVM_LD_CLANG_VERSION}"
+          # clang-cl/llvm-lib/llvm-rc ship in clang-tools-N, not llvm.sh's default package set.
+          sudo apt-get install -y "clang-tools-${LLVM_LD_CLANG_VERSION}" "llvm-${LLVM_LD_CLANG_VERSION}"
+          sudo ln -sf "/usr/bin/clang-cl-${LLVM_LD_CLANG_VERSION}" /usr/local/bin/clang-cl
+          sudo ln -sf "/usr/bin/lld-link-${LLVM_LD_CLANG_VERSION}" /usr/local/bin/lld-link
+          sudo ln -sf "/usr/bin/llvm-lib-${LLVM_LD_CLANG_VERSION}" /usr/local/bin/llvm-lib
+          sudo ln -sf "/usr/bin/llvm-rc-${LLVM_LD_CLANG_VERSION}" /usr/local/bin/llvm-rc
+          sudo ln -sf "/usr/bin/llvm-nm-${LLVM_LD_CLANG_VERSION}" /usr/local/bin/llvm-nm
+          clang-cl --version
+      - name: Cache xwin splat
+        id: xwin-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.LLVM_LD_XWIN_ROOT }}
+          # The -dbglibs suffix is part of the splat's identity, not decoration: a splat provisioned
+          # without --include-debug-libs is missing libcmtd/msvcrtd/ucrtd entirely. Bumping the key
+          # is what forces a reprovision -- this step has no restore-keys, so an exact-key change
+          # is a guaranteed cache miss rather than a fuzzy fallback onto the old contents.
+          key: xwin-${{ env.LLVM_LD_XWIN_VERSION }}-sdk${{ env.LLVM_LD_XWIN_SDK_VERSION }}-crt${{ env.LLVM_LD_XWIN_CRT_VERSION }}-dbglibs
+      - name: Provision xwin splat
+        if: steps.xwin-cache.outputs.cache-hit != 'true'
+        run: |
+          cargo install xwin --version "${LLVM_LD_XWIN_VERSION}" --locked
+          # TODO(#4): pass --manifest <pinned VS channel manifest URL/path> once that manifest and
+          # its SHA-256 are chosen and recorded in PROVENANCE.md; the default manifest floats.
+          # --include-debug-libs: a default splat drops every crt/ucrt .lib whose stem ends in `d`
+          # (libcmtd, msvcrtd, ucrtd, vcruntimed, ...). CMake's compiler-check and ABI-detection
+          # try-compiles default to the Debug configuration, so without these the very first
+          # try-compile dies on `could not open 'msvcrtd.lib'`. WinMsvcCross.cmake also pins the
+          # try-compiles to Release and to the static CRT, so this flag is belt-and-braces -- but it
+          # is cheap (this step only runs on a cache miss) and it removes an entire class of
+          # confusing Debug-only link failures for anyone configuring a Debug cross build locally.
+          xwin --accept-license \
+            --sdk-version "${LLVM_LD_XWIN_SDK_VERSION}" \
+            --crt-version "${LLVM_LD_XWIN_CRT_VERSION}" \
+            splat --include-debug-libs --output "${LLVM_LD_XWIN_ROOT}"
+      - name: Stage 1 - native llvm-tblgen / llvm-min-tblgen
+        run: |
+          # The pruned payload omits llvm/examples and llvm/benchmarks, and the
+          # standalone llvm configure does not inherit the root CMakeLists cache
+          # settings, so every LLVM_INCLUDE_* guard must be repeated here.
+          cmake -S llvm-project/llvm -B build-tblgen -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_APPEND_VC_REV=OFF \
+            -DLLVM_TARGETS_TO_BUILD=X86 \
+            -DLLVM_ENABLE_PROJECTS="" \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_BUILD_TOOLS=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_ENABLE_LIBXML2=OFF -DLLVM_ENABLE_TERMINFO=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+          cmake --build build-tblgen --target llvm-tblgen llvm-min-tblgen
+      - run: mkdir -p build-cross/.cmake/api/v1/query && touch build-cross/.cmake/api/v1/query/codemodel-v2
+      - name: Stage 2 - cross configure
+        run: |
+          cmake -S . -B build-cross -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_APPEND_VC_REV=OFF \
+            -DCMAKE_TOOLCHAIN_FILE=cmake/WinMsvcCross.cmake \
+            -DLLVM_NATIVE_TOOL_DIR="${{ github.workspace }}/build-tblgen/bin" \
+            -DLLVM_DISABLE_ASSEMBLY_FILES=ON \
+            -DLLVM_ENABLE_PCH=OFF \
+            --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace-cross.jsonl
+      - run: cmake --build build-cross --target llvm_ld abi_smoke abi_contract abi_state_test allocator-probe llvm-ld-runner llvm-ld-direct
+      - name: sccache stats
+        if: always()
+        continue-on-error: true
+        run: sccache --show-stats
+      - name: Audit mechanically derived build closure (cross)
+        run: |
+          ninja -C build-cross -t inputs llvm_ld > build-cross-inputs.txt
+          ninja -C build-cross -t deps > build-cross-deps.txt
+          python tools/audit_build.py --source . --build build-cross --ninja-inputs build-cross-inputs.txt --ninja-deps build-cross-deps.txt --cmake-trace cmake-trace-cross.jsonl --expected-llvm-closure provenance/llvm-source-closure.json --native-tool-dir build-tblgen/bin --output source-closure-linux-cross.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-cross-source-closure
+          path: source-closure-linux-cross.json
+      - name: Export allowlist (llvm-nm on the import library)
+        run: |
+          # llvm-nm against the PE DLL's own symbol table is unreliable (PE export tables are not
+          # a classic symbol table); the import library llvm-lib emits alongside llvm_ld.dll does
+          # carry a symbol table listing exactly the exported names (with __imp_ twins), so that is
+          # the cross equivalent of the Windows job's `dumpbin /exports`.
+          #
+          # Every COFF import library also defines three linker-generated boilerplate symbols that
+          # are NOT exports of the DLL and must be filtered out; verified against a real
+          # llvm_ld.lib archive symbol table, whose 13 entries are the 5 exports, their 5 __imp_
+          # twins, and exactly these three:
+          #   __IMPORT_DESCRIPTOR_llvm_ld, __NULL_IMPORT_DESCRIPTOR, \x7fllvm_ld_NULL_THUNK_DATA
+          # The thunk name carries a literal leading 0x7f byte, so it is matched end-anchored
+          # rather than by exact name. The filtering is by boilerplate SHAPE, not by an
+          # `^llvm_ld_` prefix allowlist, so an accidental non-llvm_ld export (e.g. a leaked
+          # mi_malloc) still trips the diff below.
+          #
+          # The awk takes the LAST field guarded by a single-letter nm type code in the
+          # second-to-last field, so it is correct whether llvm-nm emits the 3-column
+          # "<address> <type> <name>" form or the 2-column "<type> <name>" form for short-import
+          # members, and it skips the "archive(member):" header and blank lines (NF<2).
+          llvm-nm --defined-only --extern-only build-cross/llvm_ld.lib \
+            | awk 'NF>=2 && $(NF-1) ~ /^[A-Za-z]$/ {print $NF}' \
+            | sed 's/^__imp_//' \
+            | grep -v -E '^__(IMPORT_DESCRIPTOR_|NULL_IMPORT_DESCRIPTOR$)' \
+            | grep -v -E '_NULL_THUNK_DATA$' \
+            | sort -u > actual-exports.txt
+          printf 'llvm_ld_abi_version\nllvm_ld_allocator_get_info\nllvm_ld_invoke\nllvm_ld_profiler_start\nllvm_ld_profiler_stop\n' > expected-exports.txt
+          diff -u expected-exports.txt actual-exports.txt
+      - name: Stage test artifacts
+        run: |
+          mkdir -p stage
+          cp build-cross/llvm_ld.dll stage/
+          cp build-cross/abi_smoke.exe build-cross/abi_contract.exe build-cross/abi_state_test.exe build-cross/allocator-probe.exe stage/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-cross-stage
+          path: stage
+  test-windows-cross:
+    needs: build-linux-cross
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-cross-stage
+          path: stage
+      # verify.py checks the mimalloc payload too, and this job never configures, so nothing has
+      # fetched it. Import it first, exactly as the provenance job does.
+      - run: python tools/import.py --mimalloc-only
+      - shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          python tools/verify.py --root .
+          ./tools/run_staged_tests.ps1 -Stage ./stage
+  build-windows:
+    runs-on: windows-2025
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # payload_reproducer rebuilds an upstream stand-in from the pre-strip
+          # commit, which a shallow clone does not contain.
+          fetch-depth: 0
+      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           New-Item -ItemType Directory -Force build/.cmake/api/v1/query | Out-Null
           New-Item -ItemType File -Force build/.cmake/api/v1/query/codemodel-v2 | Out-Null
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=OFF -DLLVM_LD_ENABLE_DHAT=OFF --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace.jsonl
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=OFF -DLLVM_LD_ENABLE_DHAT=OFF -DLLVM_APPEND_VC_REV=OFF -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DLLVM_ENABLE_PCH=OFF --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace.jsonl
           cmake --build build --target llvm_ld abi_smoke abi_contract abi_state_test allocator-probe llvm-ld-runner llvm-ld-direct
           ctest --test-dir build --output-on-failure
           dumpbin /nologo /exports build/llvm_ld.dll | Select-String 'llvm_ld_(abi_version|allocator_get_info|invoke|profiler_start|profiler_stop)' | ForEach-Object { if ($_ -match 'llvm_ld_[A-Za-z_]+') { $Matches[0] } } | Sort-Object -Unique | Set-Content actual-exports.txt
@@ -61,14 +255,19 @@ jobs:
           ninja -C build -t inputs llvm_ld | Set-Content build-inputs.txt
           ninja -C build -t deps | Set-Content build-deps.txt
           python tools/audit_build.py --source . --build build --ninja-inputs build-inputs.txt --ninja-deps build-deps.txt --cmake-trace cmake-trace.jsonl --expected-llvm-closure provenance/llvm-source-closure.json --output source-closure.json
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=ON -DLLVM_LD_ENABLE_DHAT=OFF
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=ON -DLLVM_LD_ENABLE_DHAT=OFF -DLLVM_APPEND_VC_REV=OFF -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DLLVM_ENABLE_PCH=OFF
           cmake --build build --target llvm_ld allocator-probe
           ./build/allocator-probe.exe mimalloc-pprof
           if($LASTEXITCODE){throw 'sampled profiler diagnostic activation failed'}
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=OFF -DLLVM_LD_ENABLE_DHAT=ON
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=OFF -DLLVM_LD_ENABLE_DHAT=ON -DLLVM_APPEND_VC_REV=OFF -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DLLVM_ENABLE_PCH=OFF
           cmake --build build --target llvm_ld allocator-probe
           ./build/allocator-probe.exe mimalloc-dhat
           if($LASTEXITCODE){throw 'DHAT diagnostic activation failed'}
+      - name: sccache stats
+        if: always()
+        shell: pwsh
+        run: sccache --show-stats
+        continue-on-error: true
       - uses: actions/upload-artifact@v4
         with:
           name: windows-source-closure

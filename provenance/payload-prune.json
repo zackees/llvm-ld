@@ -1,0 +1,55 @@
+{
+  "note": "Declares the reviewed payload-strip decisions: which upstream directories tools/materialize_llvm_payload.py must skip when reproducing the payload from a full checkout of the pinned commit, and which retained files this repo deliberately patches away from upstream content. provenance/llvm-source-closure.json remains the sole authority over exact file contents/hashes; this file records intent, so the reproducer and tools/verify.py honour the prune and patch decisions instead of silently reverting them.",
+  "prune": [
+    "llvm/tools/",
+    "lld/ELF/",
+    "lld/MachO/",
+    "lld/wasm/",
+    "lld/tools/",
+    "lld/docs/",
+    "llvm/lib/ABI/",
+    "llvm/lib/FuzzMutate/",
+    "llvm/lib/FileCheck/",
+    "llvm/lib/InterfaceStub/",
+    "llvm/lib/CAS/",
+    "llvm/lib/DWARFLinker/",
+    "llvm/lib/MCA/",
+    "llvm/lib/ObjCopy/",
+    "llvm/lib/ObjectYAML/",
+    "llvm/lib/HTTP/",
+    "llvm/lib/Debuginfod/",
+    "llvm/lib/DWARFCFIChecker/",
+    "llvm/lib/DWP/",
+    "llvm/lib/ExecutionEngine/",
+    "llvm/lib/LineEditor/",
+    "llvm/lib/XRay/",
+    "llvm/lib/Telemetry/",
+    "llvm/lib/DebugInfo/LogicalView/",
+    "llvm/lib/Target/X86/MCA/"
+  ],
+  "keep_exceptions": [
+    "llvm/tools/CMakeLists.txt"
+  ],
+  "patched": [
+    {
+      "path": "lld/CMakeLists.txt",
+      "reason": "removes add_subdirectory calls for pruned tools/lld, docs, ELF, MachO, wasm"
+    },
+    {
+      "path": "llvm/lib/CMakeLists.txt",
+      "reason": "removes add_subdirectory calls for the pruned llvm/lib/* directories"
+    },
+    {
+      "path": "llvm/lib/DebugInfo/CMakeLists.txt",
+      "reason": "removes the add_subdirectory call for pruned DebugInfo/LogicalView"
+    },
+    {
+      "path": "llvm/lib/Target/X86/CMakeLists.txt",
+      "reason": "removes the add_subdirectory call for pruned Target/X86/MCA, which declares a LINK_COMPONENTS dependency on the pruned llvm/lib/MCA component"
+    },
+    {
+      "path": "llvm/lib/Frontend/Offloading/CMakeLists.txt",
+      "reason": "drops the LINK_COMPONENTS entry for the pruned ObjectYAML component; LLVMFrontendOffloading is configured but is not in the lldCOFF/lldMinGW/lldCommon link closure"
+    }
+  ]
+}

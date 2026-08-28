@@ -5,16 +5,27 @@ on:
 jobs:
   allocator-only:
     runs-on: windows-2025
+    env:
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1
+      - uses: mozilla-actions/sccache-action@v0.0.11
       - shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=OFF -DLLVM_LD_ENABLE_DHAT=OFF -DLLVM_LD_BUILD_SYSTEM_BASELINE=ON
+          # LLVM_APPEND_VC_REV=OFF: with it ON, LLVM stamps the git revision into the generated
+          # VCSRevision.h, so every commit changes LLVMSupport and therefore llvm_ld.dll - which
+          # defeats byte-identity comparisons across commits and poisons the compiler caches.
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=OFF -DLLVM_LD_ENABLE_DHAT=OFF -DLLVM_APPEND_VC_REV=OFF -DLLVM_LD_BUILD_SYSTEM_BASELINE=ON -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DLLVM_ENABLE_PCH=OFF
           cmake --build build --target llvm-ld-runner llvm-ld-runner-system allocator-probe allocator-probe-system
           ./tests/windows_allocator_benchmark.ps1
+      - name: sccache stats
+        if: always()
+        shell: pwsh
+        run: sccache --show-stats
+        continue-on-error: true
       - uses: actions/upload-artifact@v4
         if: always()
         with:

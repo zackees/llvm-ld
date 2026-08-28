@@ -64,3 +64,27 @@ foreach ($side in @('stock','library')) {
 Assert-Same mingw-stock-1.exe mingw-library-1.exe 'MinGW stock/library'
 & ./mingw-library-1.exe
 if ($LASTEXITCODE -ne 0) { throw "MinGW native execution failed: $LASTEXITCODE" }
+
+# Allocator-axis row: llvm-ld-runner-system.exe only exists when the build was configured with
+# -DLLVM_LD_BUILD_SYSTEM_BASELINE=ON, so its absence is a skip, not a failure.
+$systemRunnerItem = Get-Item 'build/Release/llvm-ld-runner-system.exe' -ErrorAction SilentlyContinue
+if (-not $systemRunnerItem) { $systemRunnerItem = Get-Item 'build/llvm-ld-runner-system.exe' -ErrorAction SilentlyContinue }
+if (-not $systemRunnerItem) {
+  Write-Host 'llvm-ld-runner-system.exe not found (build without -DLLVM_LD_BUILD_SYSTEM_BASELINE=ON) - skipping allocator-axis comparison'
+} else {
+  $systemRunner = $systemRunnerItem.FullName
+  $allocCommon = @('winlink','lld-link','/entry:mainCRTStartup','/subsystem:console','/nodefaultlib','/brepro')
+  foreach ($side in @('mimalloc','system')) {
+    Remove-Item result.exe -ErrorAction SilentlyContinue
+    $exe = if ($side -eq 'mimalloc') { $runner } else { $systemRunner }
+    & $exe @allocCommon /out:result.exe hello.obj
+    if ($LASTEXITCODE -ne 0) { throw "allocator-axis $side link failed: $LASTEXITCODE" }
+    Copy-Item result.exe "allocator-axis-$side.exe"
+  }
+  Assert-Same allocator-axis-mimalloc.exe allocator-axis-system.exe 'allocator-axis mimalloc/system'
+}
+
+# Re-entrancy row (item 1b) intentionally omitted: tools/runner.c's main() accepts exactly one
+# driver + one link-argument list per process invocation and calls llvm_ld_invoke exactly once
+# before exiting, so there is no existing CLI surface to drive two link jobs through a single
+# process. Adding one would mean inventing a multi-job runner protocol, which is out of scope here.
