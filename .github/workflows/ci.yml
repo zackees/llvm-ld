@@ -31,7 +31,10 @@ jobs:
         with:
           cache-cargo-registry: "false"
       - run: mkdir -p build/.cmake/api/v1/query && touch build/.cmake/api/v1/query/codemodel-v2
-      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER_LAUNCHER=zccache -DCMAKE_CXX_COMPILER_LAUNCHER=zccache -DLLVM_ENABLE_PCH=OFF --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace.jsonl
+      # LLVM_APPEND_VC_REV=OFF everywhere below: with it ON, LLVM stamps the git revision into the
+      # generated VCSRevision.h, so every commit changes LLVMSupport and therefore llvm_ld.dll -
+      # which defeats byte-identity comparisons across commits and poisons the compiler caches.
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_APPEND_VC_REV=OFF -DCMAKE_C_COMPILER_LAUNCHER=zccache -DCMAKE_CXX_COMPILER_LAUNCHER=zccache -DLLVM_ENABLE_PCH=OFF --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace.jsonl
       - run: cmake --build build --target llvm_ld abi_smoke abi_contract abi_state_test allocator-probe llvm-ld-runner llvm-ld-direct
       - name: zccache stats
         if: always()
@@ -92,17 +95,28 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.LLVM_LD_XWIN_ROOT }}
-          key: xwin-${{ env.LLVM_LD_XWIN_VERSION }}-sdk${{ env.LLVM_LD_XWIN_SDK_VERSION }}-crt${{ env.LLVM_LD_XWIN_CRT_VERSION }}
+          # The -dbglibs suffix is part of the splat's identity, not decoration: a splat provisioned
+          # without --include-debug-libs is missing libcmtd/msvcrtd/ucrtd entirely. Bumping the key
+          # is what forces a reprovision -- this step has no restore-keys, so an exact-key change
+          # is a guaranteed cache miss rather than a fuzzy fallback onto the old contents.
+          key: xwin-${{ env.LLVM_LD_XWIN_VERSION }}-sdk${{ env.LLVM_LD_XWIN_SDK_VERSION }}-crt${{ env.LLVM_LD_XWIN_CRT_VERSION }}-dbglibs
       - name: Provision xwin splat
         if: steps.xwin-cache.outputs.cache-hit != 'true'
         run: |
           cargo install xwin --version "${LLVM_LD_XWIN_VERSION}" --locked
           # TODO(#4): pass --manifest <pinned VS channel manifest URL/path> once that manifest and
           # its SHA-256 are chosen and recorded in PROVENANCE.md; the default manifest floats.
+          # --include-debug-libs: a default splat drops every crt/ucrt .lib whose stem ends in `d`
+          # (libcmtd, msvcrtd, ucrtd, vcruntimed, ...). CMake's compiler-check and ABI-detection
+          # try-compiles default to the Debug configuration, so without these the very first
+          # try-compile dies on `could not open 'msvcrtd.lib'`. WinMsvcCross.cmake also pins the
+          # try-compiles to Release and to the static CRT, so this flag is belt-and-braces -- but it
+          # is cheap (this step only runs on a cache miss) and it removes an entire class of
+          # confusing Debug-only link failures for anyone configuring a Debug cross build locally.
           xwin --accept-license \
             --sdk-version "${LLVM_LD_XWIN_SDK_VERSION}" \
             --crt-version "${LLVM_LD_XWIN_CRT_VERSION}" \
-            splat --output "${LLVM_LD_XWIN_ROOT}"
+            splat --include-debug-libs --output "${LLVM_LD_XWIN_ROOT}"
       - name: Stage 1 - native llvm-tblgen / llvm-min-tblgen
         run: |
           # The pruned payload omits llvm/examples and llvm/benchmarks, and the
@@ -110,6 +124,7 @@ jobs:
           # settings, so every LLVM_INCLUDE_* guard must be repeated here.
           cmake -S llvm-project/llvm -B build-tblgen -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_APPEND_VC_REV=OFF \
             -DLLVM_TARGETS_TO_BUILD=X86 \
             -DLLVM_ENABLE_PROJECTS="" \
             -DLLVM_INCLUDE_TESTS=OFF \
@@ -125,6 +140,7 @@ jobs:
         run: |
           cmake -S . -B build-cross -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_APPEND_VC_REV=OFF \
             -DCMAKE_TOOLCHAIN_FILE=cmake/WinMsvcCross.cmake \
             -DLLVM_NATIVE_TOOL_DIR="${{ github.workspace }}/build-tblgen/bin" \
             -DLLVM_DISABLE_ASSEMBLY_FILES=ON \
@@ -218,7 +234,7 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           New-Item -ItemType Directory -Force build/.cmake/api/v1/query | Out-Null
           New-Item -ItemType File -Force build/.cmake/api/v1/query/codemodel-v2 | Out-Null
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=OFF -DLLVM_LD_ENABLE_DHAT=OFF -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DLLVM_ENABLE_PCH=OFF --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace.jsonl
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=OFF -DLLVM_LD_ENABLE_DHAT=OFF -DLLVM_APPEND_VC_REV=OFF -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DLLVM_ENABLE_PCH=OFF --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace.jsonl
           cmake --build build --target llvm_ld abi_smoke abi_contract abi_state_test allocator-probe llvm-ld-runner llvm-ld-direct
           ctest --test-dir build --output-on-failure
           dumpbin /nologo /exports build/llvm_ld.dll | Select-String 'llvm_ld_(abi_version|allocator_get_info|invoke|profiler_start|profiler_stop)' | ForEach-Object { if ($_ -match 'llvm_ld_[A-Za-z_]+') { $Matches[0] } } | Sort-Object -Unique | Set-Content actual-exports.txt
@@ -227,11 +243,11 @@ jobs:
           ninja -C build -t inputs llvm_ld | Set-Content build-inputs.txt
           ninja -C build -t deps | Set-Content build-deps.txt
           python tools/audit_build.py --source . --build build --ninja-inputs build-inputs.txt --ninja-deps build-deps.txt --cmake-trace cmake-trace.jsonl --expected-llvm-closure provenance/llvm-source-closure.json --output source-closure.json
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=ON -DLLVM_LD_ENABLE_DHAT=OFF -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DLLVM_ENABLE_PCH=OFF
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=ON -DLLVM_LD_ENABLE_DHAT=OFF -DLLVM_APPEND_VC_REV=OFF -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DLLVM_ENABLE_PCH=OFF
           cmake --build build --target llvm_ld allocator-probe
           ./build/allocator-probe.exe mimalloc-pprof
           if($LASTEXITCODE){throw 'sampled profiler diagnostic activation failed'}
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=OFF -DLLVM_LD_ENABLE_DHAT=ON -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DLLVM_ENABLE_PCH=OFF
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=OFF -DLLVM_LD_ENABLE_DHAT=ON -DLLVM_APPEND_VC_REV=OFF -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DLLVM_ENABLE_PCH=OFF
           cmake --build build --target llvm_ld allocator-probe
           ./build/allocator-probe.exe mimalloc-dhat
           if($LASTEXITCODE){throw 'DHAT diagnostic activation failed'}

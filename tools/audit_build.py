@@ -28,8 +28,17 @@ def main() -> int:
         "mimalloc":mimalloc_root,
     }
     allowed_files={(source/"CMakeLists.txt").resolve()}
+    # LLVM's find_first_existing_vc_file (AddLLVM.cmake) makes this checkout's .git/logs/HEAD a
+    # dependency of the generated VCSRevision.h so the revision stamp refreshes on commit. That is
+    # VCS metadata, not build source: no byte of it is compiled or included, so exempting it does
+    # not weaken the guarantee that every compiled/included byte comes from the pinned LLVM payload
+    # or a declared input. Scoped to this repository's own .git, and only to files that are not
+    # source-shaped - a header stashed under .git and #included would still arrive through the
+    # dependency channel and must still be rejected. Deliberately not added to the inventory.
+    vcs_dir=(source/".git").resolve()
     mimalloc_manifest=json.loads((source/"provenance"/"mimalloc-pprof-files.json").read_text(encoding="utf-8"))
     def record(candidate: pathlib.Path, context: str) -> None:
+        if inside(candidate,vcs_dir) and candidate.suffix.lower() not in SOURCE_SUFFIXES: return
         if candidate in allowed_files:
             inventory[f"project/{candidate.name}"]=hashlib.sha256(candidate.read_bytes()).hexdigest()
             return

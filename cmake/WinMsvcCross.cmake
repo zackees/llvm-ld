@@ -18,11 +18,14 @@
 #       --manifest-version 16 \
 #       --sdk-version <PINNED_SDK_VERSION> \
 #       --crt-version <PINNED_CRT_VERSION> \
-#       splat --output "$LLVM_LD_XWIN_ROOT"
+#       splat --include-debug-libs --output "$LLVM_LD_XWIN_ROOT"
 #
-#   Add --include-debug-libs if a Debug configuration is ever built (the default splat omits
-#   libcmtd/ucrtd). See PROVENANCE.md for the exact pinned manifest SHA-256 and versions this
-#   repository records.
+#   --include-debug-libs is required, not optional: a default splat drops every crt/ucrt .lib whose
+#   stem ends in `d` (libcmtd, msvcrtd, ucrtd, vcruntimed, msvcprtd, ...). Without it, any Debug
+#   configuration -- including CMake's own compiler-check/ABI-detection try-compiles, which this
+#   file pins to Release below precisely because they would otherwise default to Debug -- fails with
+#   `lld-link: error: could not open 'msvcrtd.lib'`. See PROVENANCE.md for the exact pinned manifest
+#   SHA-256 and versions this repository records.
 #
 #   The resulting splat contains proprietary Microsoft binaries (MSVC CRT + Windows SDK) that are
 #   NOT redistributable. It must NEVER be committed to this repository or published as a build
@@ -68,9 +71,8 @@ foreach(_llvm_ld_dir ${_llvm_ld_xwin_required_dirs})
   if(NOT IS_DIRECTORY "${_llvm_ld_dir}")
     message(FATAL_ERROR
       "xwin splat at LLVM_LD_XWIN_ROOT='${LLVM_LD_XWIN_ROOT}' is missing expected directory "
-      "'${_llvm_ld_dir}'. Re-provision the splat with the `xwin ... splat` command documented at "
-      "the top of cmake/WinMsvcCross.cmake (add --include-debug-libs if this is a Debug "
-      "configuration).")
+      "'${_llvm_ld_dir}'. Re-provision the splat with the `xwin ... splat --include-debug-libs` "
+      "command documented at the top of cmake/WinMsvcCross.cmake.")
   endif()
 endforeach()
 
@@ -107,15 +109,48 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "${_llvm_ld_link_flags_joined}")
 set(CMAKE_SHARED_LINKER_FLAGS_INIT "${_llvm_ld_link_flags_joined}")
 set(CMAKE_MODULE_LINKER_FLAGS_INIT "${_llvm_ld_link_flags_joined}")
 
-# Root CMakeLists.txt already sets CMAKE_MSVC_RUNTIME_LIBRARY to the static CRT under
-# `if(MSVC)`; CMake sets MSVC=1 for clang-cl (via CMAKE_CXX_SIMULATE_ID=MSVC), so that logic
-# fires for free here. Do not duplicate or override it in this toolchain file.
+# Static CRT selection. This *must* live in the toolchain file, not only in the root
+# CMakeLists.txt, because the root CMakeLists.txt does not execute inside CMake's own
+# compiler-check and ABI-detection test projects (CMakeTestCCompiler.cmake /
+# CMakeDetermineCompilerABI.cmake), which run during project()/enable_language() -- i.e. before
+# any of the root project's own `set()` calls have had any effect on them. The toolchain file, by
+# contrast, is re-read inside every try_compile sub-configure, and CMake documents
+# CMAKE_MSVC_RUNTIME_LIBRARY as being "propagated by calls to the try_compile() command into the
+# test project". Without this, those test projects fall back to the CMP0091=NEW default
+# `MultiThreaded$<$<CONFIG:Debug>:Debug>DLL` and lld-link fails with
+# `could not open 'msvcrtd.lib'`.
+#
+# The value is character-for-character the same expression the root CMakeLists.txt sets under
+# `if(MSVC)`, so the root project's enforcement cannot be weakened: whichever of the two runs last
+# stores the identical string. This toolchain file only *extends* that enforcement backwards in
+# time to cover the try-compiles; the root `if(MSVC)` block is still the sole authority for the
+# native Windows build, where no toolchain file is loaded at all. The static CRT is a hard
+# requirement, not a preference: mimalloc's Windows malloc override compiles out when `_DLL` is
+# defined, which is exactly what /MD(d) defines.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+# CMake's ABI-detection try-compile defaults to the Debug configuration when
+# CMAKE_TRY_COMPILE_CONFIGURATION is unset (CMakeDetermineCompilerABI.cmake: `else() set(_tc_config
+# "DEBUG")`). A default `xwin splat` ships no debug CRT at all -- it drops every crt/ucrt .lib whose
+# stem ends in `d` unless `--include-debug-libs` is passed -- so pin the try-compiles to Release.
+# This only affects try_compile(); the real build's configuration still comes from
+# CMAKE_BUILD_TYPE on the configure command line.
+set(CMAKE_TRY_COMPILE_CONFIGURATION "Release")
 
 # Forward the splat root and triple into try-compile's ABI-detection sub-configure, otherwise it
 # cannot see the CRT/SDK libs and every feature check fails.
 list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES
   LLVM_LD_XWIN_ROOT
   LLVM_LD_WINDOWS_TRIPLE)
+
+# Deliberately NOT set: CMAKE_RC_FLAGS_INIT. llvm-rc gets no xwin include paths, so any target with
+# a .rc input would fail to find <windows.h>. This is currently unreachable -- no target this repo
+# builds has a .rc source -- and it is left alone on purpose: the -imsvc spelling used above is a
+# clang driver flag that llvm-rc does not accept, llvm-rc's own include syntax could not be
+# validated from a Windows host with no llvm-rc, and LLVM's reference cross toolchain
+# (llvm/cmake/platforms/WinMsvc.cmake, llvmorg-23.1.0) sets no CMAKE_RC_FLAGS either, so there is no
+# vetted pattern to copy. Add `/I` paths here, verified against a real llvm-rc, if a .rc is ever
+# introduced.
 
 set(CMAKE_FIND_ROOT_PATH "${LLVM_LD_XWIN_ROOT}")
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)

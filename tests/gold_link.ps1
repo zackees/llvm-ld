@@ -1,5 +1,6 @@
 param(
-  [string]$BuildDir = 'build'
+  [string]$BuildDir = 'build',
+  [switch]$SelfTest
 )
 $ErrorActionPreference = 'Stop'
 
@@ -26,8 +27,17 @@ function Resolve-BuildBinary([string]$buildDir, [string]$name) {
 # body), resolving ninja's '$'-escapes: '$$' -> literal '$', '$ ' -> literal space (kept inside a
 # token, not a separator), '$:' -> literal ':'. Any other '$x' sequence is an escape this script
 # does not understand, so it fails loudly instead of silently mis-tokenizing.
+#
+# CMake also emits double-quoted spans in LINK_LIBRARIES for paths containing spaces (on a VS
+# Enterprise runner the DIA SDK's diaguids.lib is one), so a quoted span is a single token and the
+# quotes themselves are stripped: lld-link receives each token as a plain argv entry, and retaining
+# the quotes would make it look for a file whose name literally starts with '"'. Splitting is
+# single-pass and stateful rather than split-then-unescape, because whitespace is only a separator
+# outside a quoted span.
 function ConvertTo-NinjaTokens([string]$text) {
+  $tokens = @()
   $sb = New-Object System.Text.StringBuilder
+  $inQuote = $false
   $i = 0
   while ($i -lt $text.Length) {
     $c = $text[$i]
@@ -35,16 +45,55 @@ function ConvertTo-NinjaTokens([string]$text) {
       if ($i + 1 -ge $text.Length) { throw "unterminated '`$' escape at end of ninja text: $text" }
       $next = $text[$i + 1]
       if ($next -eq '$') { [void]$sb.Append('$'); $i += 2 }
-      elseif ($next -eq ' ') { [void]$sb.Append([char]1); $i += 2 }
+      elseif ($next -eq ' ') { [void]$sb.Append(' '); $i += 2 }
       elseif ($next -eq ':') { [void]$sb.Append(':'); $i += 2 }
       else { throw "unhandled ninja '`$' escape sequence '`$$next' - extend ConvertTo-NinjaTokens in tests/gold_link.ps1 before proceeding. Context: $text" }
+    } elseif ($c -eq '"') {
+      $inQuote = -not $inQuote; $i += 1
+    } elseif (-not $inQuote -and [char]::IsWhiteSpace($c)) {
+      if ($sb.Length -gt 0) { $tokens += $sb.ToString(); [void]$sb.Clear() }
+      $i += 1
     } else {
       [void]$sb.Append($c); $i += 1
     }
   }
-  $protected = $sb.ToString()
-  return ($protected -split '\s+' | Where-Object { $_.Length -gt 0 } | ForEach-Object { $_ -replace [char]1, ' ' })
+  if ($inQuote) { throw "unterminated double quote in ninja text: $text" }
+  if ($sb.Length -gt 0) { $tokens += $sb.ToString() }
+  return $tokens
 }
+
+# Runnable with: ./tests/gold_link.ps1 -SelfTest (no build tree required).
+function Invoke-TokenizerSelfTest {
+  $dia = '"C:\Program Files\Microsoft Visual Studio\18\Enterprise\DIA SDK\lib\amd64\diaguids.lib"'
+  $diaExpected = 'C:\Program Files\Microsoft Visual Studio\18\Enterprise\DIA SDK\lib\amd64\diaguids.lib'
+  $cases = @(
+    @{ Name = 'DIA SDK path alone'; Text = $dia; Expect = @($diaExpected) }
+    @{ Name = 'DIA SDK path between unquoted tokens'; Text = "lib\LLVMSupport.lib $dia kernel32.lib"; Expect = @('lib\LLVMSupport.lib', $diaExpected, 'kernel32.lib') }
+    @{ Name = 'two quoted tokens'; Text = '"a b.lib" "c d.lib"'; Expect = @('a b.lib', 'c d.lib') }
+    @{ Name = 'quoted token containing a ninja $ escape'; Text = '"a$ b\c d.lib"'; Expect = @('a b\c d.lib') }
+    @{ Name = 'quoted span adjacent to unquoted text'; Text = 'pre"a b"post'; Expect = @('prea bpost') }
+    @{ Name = 'unquoted $$ and $: escapes'; Text = 'C$:\x$$y.lib z.lib'; Expect = @('C:\x$y.lib', 'z.lib') }
+    @{ Name = 'unquoted $ escape (legacy behaviour)'; Text = 'a$ b.lib c.lib'; Expect = @('a b.lib', 'c.lib') }
+  )
+  foreach ($case in $cases) {
+    $got = @(ConvertTo-NinjaTokens $case.Text)
+    $expect = @($case.Expect)
+    if ($got.Count -ne $expect.Count) { throw "$($case.Name): expected $($expect.Count) token(s), got $($got.Count): $($got -join ' | ')" }
+    for ($k = 0; $k -lt $expect.Count; $k++) {
+      if ($got[$k] -cne $expect[$k]) { throw "$($case.Name): token $k expected '$($expect[$k])', got '$($got[$k])'" }
+    }
+    Write-Host "ok  $($case.Name) -> [$($got -join '] [')]"
+  }
+  foreach ($bad in @('"C:\a b.lib', 'a.lib "b c')) {
+    $threw = $false
+    try { ConvertTo-NinjaTokens $bad } catch { $threw = $true }
+    if (-not $threw) { throw "unterminated quote did not throw: $bad" }
+    Write-Host "ok  unterminated quote throws -> $bad"
+  }
+  Write-Host 'gold_link.ps1: ConvertTo-NinjaTokens self-test passed'
+}
+
+if ($SelfTest) { Invoke-TokenizerSelfTest; exit 0 }
 
 # Reads the static 'build <target>.exe: <rule> <inputs...> [| implicit] [|| order-only]' edge and
 # its following indented KEY = VALUE variable block directly out of build.ninja. This avoids both
