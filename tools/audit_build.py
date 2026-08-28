@@ -7,6 +7,11 @@ SOURCE_SUFFIXES={".c",".cc",".cpp",".cxx",".h",".hh",".hpp",".inc",".td",".def"}
 def inside(path: pathlib.Path, root: pathlib.Path) -> bool:
     try: path.relative_to(root); return True
     except ValueError: return False
+def looks_like_path(value: str) -> bool:
+    # Conservative pre-filter, not validation: a real read still has to exist on disk and fall
+    # inside a declared root. This only rejects values no filesystem could name, so probing them
+    # raises ENAMETOOLONG instead of answering False.
+    return bool(value) and "\n" not in value and "\x00" not in value and len(value)<=4096
 def main() -> int:
     p=argparse.ArgumentParser(); p.add_argument("--source",type=pathlib.Path,required=True); p.add_argument("--build",type=pathlib.Path,required=True); p.add_argument("--ninja-inputs",type=pathlib.Path,required=True); p.add_argument("--ninja-deps",type=pathlib.Path); p.add_argument("--output",type=pathlib.Path,required=True); p.add_argument("--cmake-trace",type=pathlib.Path); p.add_argument("--expected-llvm-closure",type=pathlib.Path); a=p.parse_args()
     source=a.source.resolve(); build=a.build.resolve()
@@ -85,11 +90,17 @@ def main() -> int:
             if candidate.is_file() and (inside(candidate,source) or inside(candidate,build)):
                 record(candidate,"CMake trace read")
             for value in entry.get("args",[]):
+                # --trace-expand inlines whole file bodies as arguments (configure_file templates,
+                # multi-line strings). Those are not paths, and probing them raises ENAMETOOLONG
+                # rather than returning False.
+                if not looks_like_path(value): continue
                 candidate=pathlib.Path(value)
                 if not candidate.is_absolute(): candidate=trace_file.parent/candidate
-                try: candidate=candidate.resolve()
+                try:
+                    candidate=candidate.resolve()
+                    if not candidate.is_file(): continue
                 except OSError: continue
-                if candidate.is_file() and (inside(candidate,source) or inside(candidate,build)):
+                if inside(candidate,source) or inside(candidate,build):
                     record(candidate,"CMake argument read")
     reply=build/".cmake"/"api"/"v1"/"reply"
     if not list(reply.glob("codemodel-v2-*.json")): raise SystemExit("CMake file-api codemodel missing")
