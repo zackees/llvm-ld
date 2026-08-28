@@ -76,13 +76,16 @@ jobs:
       # cross-only header drift. WinMsvcCross.cmake also defines those macros empty as a backstop.
       LLVM_LD_XWIN_SDK_VERSION: "10.0.26100"
       LLVM_LD_XWIN_CRT_VERSION: "14.44.17.14"
-      # Outside the checkout on purpose. The splat is a toolchain sysroot, exactly like the MSVC
-      # install the native Windows job compiles against, and that one sits outside the source tree
-      # so the closure audit never sees its headers as build source reads. Keeping the splat inside
-      # the workspace would instead require exempting it, which would blunt the audit.
-      LLVM_LD_XWIN_ROOT: ${{ runner.temp }}/xwin-splat
     steps:
       - uses: actions/checkout@v4
+      # LLVM_LD_XWIN_ROOT is set here rather than in the job env because it must live OUTSIDE the
+      # checkout and only $RUNNER_TEMP gives that; the runner context is not available to a
+      # job-level env block. The splat is a toolchain sysroot, exactly like the MSVC install the
+      # native Windows job compiles against, and that one sits outside the source tree so the
+      # closure audit never sees its headers as build source reads. Keeping it inside the workspace
+      # would instead require exempting a directory of headers, which would blunt the audit.
+      - name: Resolve toolchain sysroot location
+        run: echo "LLVM_LD_XWIN_ROOT=$RUNNER_TEMP/xwin-splat" >> "$GITHUB_ENV"
       - uses: mozilla-actions/sccache-action@v0.0.11
       - name: Install pinned clang/lld
         run: |
