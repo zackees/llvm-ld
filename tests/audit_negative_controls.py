@@ -10,7 +10,9 @@ class AuditNegativeControls(unittest.TestCase):
             (source/"llvm-project"/"llvm").mkdir(parents=True)
             (source/"llvm-project"/"llvm"/"CMakeLists.txt").write_text("# pinned\n")
             (source/"provenance").mkdir(); (source/"upstream"/"mimalloc-pprof-0.9.5").mkdir(parents=True)
+            (source/"upstream"/"libxml2-2.15.3").mkdir(parents=True)
             (source/"provenance"/"mimalloc-pprof-files.json").write_text(json.dumps(manifest))
+            (source/"provenance"/"libxml2-files.json").write_text("{}")
             candidate=source/relative; candidate.parent.mkdir(parents=True,exist_ok=True); candidate.write_text("int x;\n")
             (build/".cmake"/"api"/"v1"/"reply").mkdir(parents=True)
             (build/".cmake"/"api"/"v1"/"reply"/"codemodel-v2-test.json").write_text("{}")
@@ -26,13 +28,34 @@ class AuditNegativeControls(unittest.TestCase):
     def test_modified_mimalloc_input_is_rejected(self):
         self.run_case("upstream/mimalloc-pprof-0.9.5/bad.c",{"bad.c":"0"*64},"undeclared or modified mimalloc")
 
+    def test_modified_libxml2_input_is_rejected(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root=pathlib.Path(raw); source=root/"source"; build=root/"build"
+            (source/"llvm-project"/"llvm").mkdir(parents=True)
+            (source/"llvm-project"/"llvm"/"CMakeLists.txt").write_text("# pinned\n")
+            (source/"provenance").mkdir(); (source/"upstream"/"mimalloc-pprof-0.9.5").mkdir(parents=True)
+            (source/"upstream"/"libxml2-2.15.3").mkdir(parents=True)
+            (source/"provenance"/"mimalloc-pprof-files.json").write_text("{}")
+            (source/"provenance"/"libxml2-files.json").write_text(json.dumps({"bad.c":"0"*64}))
+            candidate=source/"upstream"/"libxml2-2.15.3"/"bad.c"
+            candidate.parent.mkdir(parents=True,exist_ok=True); candidate.write_text("int x;\n")
+            (build/".cmake"/"api"/"v1"/"reply").mkdir(parents=True)
+            (build/".cmake"/"api"/"v1"/"reply"/"codemodel-v2-test.json").write_text("{}")
+            (build/"compile_commands.json").write_text(json.dumps([{"file":str(candidate),"directory":str(build)}]))
+            inputs=build/"inputs.txt"; inputs.write_text("")
+            result=subprocess.run([sys.executable,str(AUDIT),"--source",str(source),"--build",str(build),"--ninja-inputs",str(inputs),"--output",str(build/"out.json")],text=True,capture_output=True)
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn("undeclared or modified libxml2",result.stdout+result.stderr)
+
     def run_aux_case(self, channel: str, expected: str) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root=pathlib.Path(raw); source=root/"source"; build=root/"build"
             (source/"llvm-project"/"llvm").mkdir(parents=True)
             (source/"llvm-project"/"llvm"/"CMakeLists.txt").write_text("# pinned\n")
             (source/"provenance").mkdir(); (source/"upstream"/"mimalloc-pprof-0.9.5").mkdir(parents=True)
+            (source/"upstream"/"libxml2-2.15.3").mkdir(parents=True)
             (source/"provenance"/"mimalloc-pprof-files.json").write_text("{}")
+            (source/"provenance"/"libxml2-files.json").write_text("{}")
             declared=source/"src"/"declared.c"; declared.parent.mkdir(); declared.write_text("int x;\n")
             rogue=source/"rogue.c"; rogue.write_text("int rogue;\n")
             (build/".cmake"/"api"/"v1"/"reply").mkdir(parents=True)
@@ -56,7 +79,9 @@ class AuditNegativeControls(unittest.TestCase):
             (source/"llvm-project"/"llvm").mkdir(parents=True)
             (source/"llvm-project"/"llvm"/"CMakeLists.txt").write_text("# pinned\n")
             (source/"provenance").mkdir(); (source/"upstream"/"mimalloc-pprof-0.9.5").mkdir(parents=True)
+            (source/"upstream"/"libxml2-2.15.3").mkdir(parents=True)
             (source/"provenance"/"mimalloc-pprof-files.json").write_text("{}")
+            (source/"provenance"/"libxml2-files.json").write_text("{}")
             declared=source/"src"/"declared.c"; declared.parent.mkdir(); declared.write_text("int x;\n")
             vcs=source/relative; vcs.parent.mkdir(parents=True,exist_ok=True); vcs.write_text("ref: refs/heads/main\n")
             (build/".cmake"/"api"/"v1"/"reply").mkdir(parents=True)

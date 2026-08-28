@@ -34,7 +34,7 @@ jobs:
       # LLVM_APPEND_VC_REV=OFF everywhere below: with it ON, LLVM stamps the git revision into the
       # generated VCSRevision.h, so every commit changes LLVMSupport and therefore llvm_ld.dll -
       # which defeats byte-identity comparisons across commits and poisons the compiler caches.
-      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_APPEND_VC_REV=OFF -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DLLVM_ENABLE_PCH=OFF --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace.jsonl
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_APPEND_VC_REV=OFF -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace.jsonl
       - run: cmake --build build --target llvm_ld abi_smoke abi_contract abi_state_test allocator-probe llvm-ld-runner llvm-ld-direct
       - name: sccache stats
         if: always()
@@ -155,7 +155,7 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE=cmake/WinMsvcCross.cmake \
             -DLLVM_NATIVE_TOOL_DIR="${{ github.workspace }}/build-tblgen/bin" \
             -DLLVM_DISABLE_ASSEMBLY_FILES=ON \
-            -DLLVM_ENABLE_PCH=OFF \
+            \
             --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace-cross.jsonl
       - run: cmake --build build-cross --target llvm_ld abi_smoke abi_contract abi_state_test allocator-probe llvm-ld-runner llvm-ld-direct
       - name: sccache stats
@@ -205,6 +205,9 @@ jobs:
           mkdir -p stage
           cp build-cross/llvm_ld.dll stage/
           cp build-cross/abi_smoke.exe build-cross/abi_contract.exe build-cross/abi_state_test.exe build-cross/allocator-probe.exe stage/
+          # windows_manifest_merge.ps1 drives a real link through the wrapper, so the runner has
+          # to be staged too, not just the ABI test binaries.
+          cp build-cross/llvm-ld-runner.exe stage/
       - uses: actions/upload-artifact@v4
         with:
           name: linux-cross-stage
@@ -228,6 +231,10 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           python tools/verify.py --root .
           ./tools/run_staged_tests.ps1 -Stage ./stage
+          # The cross lane is where the vendored libxml2 is most likely to break, since clang-cl
+          # compiles it against the xwin sysroot rather than a real MSVC install. Prove the
+          # cross-built DLL merges manifests in-process, not just that it loads.
+          ./tests/windows_manifest_merge.ps1 -BuildDir ./stage
   build-windows:
     runs-on: windows-2025
     env:
@@ -246,7 +253,7 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           New-Item -ItemType Directory -Force build/.cmake/api/v1/query | Out-Null
           New-Item -ItemType File -Force build/.cmake/api/v1/query/codemodel-v2 | Out-Null
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=OFF -DLLVM_LD_ENABLE_DHAT=OFF -DLLVM_APPEND_VC_REV=OFF -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DLLVM_ENABLE_PCH=OFF --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace.jsonl
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=OFF -DLLVM_LD_ENABLE_DHAT=OFF -DLLVM_APPEND_VC_REV=OFF -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace.jsonl
           cmake --build build --target llvm_ld abi_smoke abi_contract abi_state_test allocator-probe llvm-ld-runner llvm-ld-direct
           ctest --test-dir build --output-on-failure
           dumpbin /nologo /exports build/llvm_ld.dll | Select-String 'llvm_ld_(abi_version|allocator_get_info|invoke|profiler_start|profiler_stop)' | ForEach-Object { if ($_ -match 'llvm_ld_[A-Za-z_]+') { $Matches[0] } } | Sort-Object -Unique | Set-Content actual-exports.txt
@@ -255,11 +262,11 @@ jobs:
           ninja -C build -t inputs llvm_ld | Set-Content build-inputs.txt
           ninja -C build -t deps | Set-Content build-deps.txt
           python tools/audit_build.py --source . --build build --ninja-inputs build-inputs.txt --ninja-deps build-deps.txt --cmake-trace cmake-trace.jsonl --expected-llvm-closure provenance/llvm-source-closure.json --output source-closure.json
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=ON -DLLVM_LD_ENABLE_DHAT=OFF -DLLVM_APPEND_VC_REV=OFF -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DLLVM_ENABLE_PCH=OFF
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=ON -DLLVM_LD_ENABLE_DHAT=OFF -DLLVM_APPEND_VC_REV=OFF -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
           cmake --build build --target llvm_ld allocator-probe
           ./build/allocator-probe.exe mimalloc-pprof
           if($LASTEXITCODE){throw 'sampled profiler diagnostic activation failed'}
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=OFF -DLLVM_LD_ENABLE_DHAT=ON -DLLVM_APPEND_VC_REV=OFF -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DLLVM_ENABLE_PCH=OFF
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=OFF -DLLVM_LD_ENABLE_DHAT=ON -DLLVM_APPEND_VC_REV=OFF -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
           cmake --build build --target llvm_ld allocator-probe
           ./build/allocator-probe.exe mimalloc-dhat
           if($LASTEXITCODE){throw 'DHAT diagnostic activation failed'}

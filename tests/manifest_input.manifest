@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  tests/windows_manifest_merge.ps1 fixture. This is a small, realistic user-supplied manifest
+  fragment (the kind an application would pass via `/manifestinput:`) merged by lld-link's
+  in-process libxml2-backed windows_manifest merger, NOT the manifest emitted verbatim.
+
+  Two strings below are distinctive on purpose so the test can confirm a real merge happened
+  rather than the linker's own default manifest being emitted unchanged:
+    - the <description> text "llvm-ld manifest merge fixture"
+    - the Windows 8.1 supportedOS GUID in the <compatibility> block
+
+  Deliberately no <trustInfo>/requestedExecutionLevel here: lld's generated default manifest
+  already carries one (asInvoker, from /manifestuac), and the merger rejects a second one with
+  "conflicting attributes for requestedExecutionLevel". Merging additive elements is what this
+  fixture is for; UAC-level conflict handling is lld's own behaviour, not ours to exercise.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <description>llvm-ld manifest merge fixture</description>
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+      <!-- Windows 8.1 -->
+      <supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6d0da78}"/>
+    </application>
+  </compatibility>
+</assembly>

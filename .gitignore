@@ -9,3 +9,13 @@
 /gold-*.exe
 /gold-*.pdb
 /allocator-axis-*.exe
+/merge-*.exe
+/merge-*.manifest.xml
+/hello.c
+/hello.obj
+/hello-*.obj
+/result.exe
+/result.pdb
+/msvc-*.exe
+/msvc-*.pdb
+/mingw-*.exe

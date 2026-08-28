@@ -22,6 +22,7 @@ def main() -> int:
     # Most-specific roots first because the FetchContent and generated trees live below build,
     # which itself can live below the checkout.
     mimalloc_root=(source/"upstream"/"mimalloc-pprof-0.9.5").resolve()
+    libxml2_root=(source/"upstream"/"libxml2-2.15.3").resolve()
     allowed={
         "llvm":llvm_roots[0].resolve(),
         "generated":build,
@@ -31,6 +32,7 @@ def main() -> int:
         "tools":(source/"tools").resolve(),
         "cmake":(source/"cmake").resolve(),
         "mimalloc":mimalloc_root,
+        "libxml2":libxml2_root,
     }
     # A cross build runs TableGen from a separate native stage-1 build tree, so those executables
     # are read as generator tools. They are build outputs of the same pinned payload, not source.
@@ -48,6 +50,7 @@ def main() -> int:
     # dependency channel and must still be rejected. Deliberately not added to the inventory.
     vcs_dir=(source/".git").resolve()
     mimalloc_manifest=json.loads((source/"provenance"/"mimalloc-pprof-files.json").read_text(encoding="utf-8"))
+    libxml2_manifest=json.loads((source/"provenance"/"libxml2-files.json").read_text(encoding="utf-8"))
     def record(candidate: pathlib.Path, context: str) -> None:
         if inside(candidate,vcs_dir) and candidate.suffix.lower() not in SOURCE_SUFFIXES: return
         if candidate in allowed_files:
@@ -60,6 +63,8 @@ def main() -> int:
         digest=hashlib.sha256(candidate.read_bytes()).hexdigest()
         if name=="mimalloc" and mimalloc_manifest.get(relative)!=digest:
             raise SystemExit(f"undeclared or modified mimalloc {context}: {relative}")
+        if name=="libxml2" and libxml2_manifest.get(relative)!=digest:
+            raise SystemExit(f"undeclared or modified libxml2 {context}: {relative}")
         inventory[f"{name}/{relative}"]=digest
     inventory={}
     for entry in commands:
