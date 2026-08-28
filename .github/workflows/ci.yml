@@ -70,7 +70,11 @@ jobs:
       # TODO(#4): pin the exact xwin --manifest source (a specific Visual Studio channel manifest
       # URL/SHA-256) and --sdk-version/--crt-version. Left as a placeholder because the pinned
       # values must be chosen and recorded in PROVENANCE.md together, not guessed here.
-      LLVM_LD_XWIN_SDK_VERSION: "10.0.22621"
+      # Matches the SDK the native build-windows job compiles against. The older 10.0.22621 ucrt
+      # headers omit CRT decoration macros the vendored mimalloc amalgamation uses bare
+      # (_CRT_HYBRIDPATCHABLE, _CRT_NOEXCEPT), so keeping the two paths on one SDK avoids
+      # cross-only header drift. WinMsvcCross.cmake also defines those macros empty as a backstop.
+      LLVM_LD_XWIN_SDK_VERSION: "10.0.26100"
       LLVM_LD_XWIN_CRT_VERSION: "14.44.17.14"
       LLVM_LD_XWIN_ROOT: ${{ github.workspace }}/xwin-splat
     steps:

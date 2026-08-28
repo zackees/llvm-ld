@@ -93,7 +93,61 @@ set(_llvm_ld_imsvc_flags
   "-imsvc \"${LLVM_LD_XWIN_ROOT}/sdk/include/um\""
   "-imsvc \"${LLVM_LD_XWIN_ROOT}/sdk/include/shared\"")
 string(JOIN " " _llvm_ld_imsvc_flags_joined ${_llvm_ld_imsvc_flags})
-set(CMAKE_C_FLAGS_INIT "${_llvm_ld_imsvc_flags_joined}")
+
+# CRT declspec/annotation macros that the vendored mimalloc amalgamation
+# (upstream/mimalloc-pprof-0.9.5/vendor/mimalloc-pprof-amalgamated.c, mimalloc v3's
+# src/alloc-override.c) uses *bare* when it re-defines the CRT allocator entry points under
+# `#elif defined(_MSC_VER)`:
+#
+#   _Check_return_ _Ret_maybenull_ _Post_writable_byte_size_(_Size) _ACRTIMP _CRTALLOCATOR _CRT_HYBRIDPATCHABLE
+#   void* __cdecl _expand(...)                                       // amalgamation line 6083
+#   _Check_return_ _ACRTIMP
+#   size_t __cdecl _msize_base(...) _CRT_NOEXCEPT                    // amalgamation line 6088
+#
+# mimalloc provides no fallback definitions for these (verified against
+# microsoft/mimalloc dev src/alloc-override.c); it assumes whatever <corecrt.h> the CRT headers
+# supply defines all of them. The ucrt headers in the xwin splat this cross build consumes do NOT
+# define `_CRT_HYBRIDPATCHABLE` or `_CRT_NOEXCEPT`, so clang-cl reports
+# `error: unknown type name '_CRT_HYBRIDPATCHABLE'` followed by
+# `error: expected function body after function declarator` at the `_CRT_NOEXCEPT`. (The
+# `#pragma visibility pop with no matching push` at line 6359 is parser-recovery fallout from the
+# second error, not an independent problem.) They *are* defined by the SDK that the native
+# `build-windows` job's cl.exe uses, which is why only the cross build fails.
+#
+# Defining them empty here is not a workaround that changes code generation -- it is exactly the
+# expansion a genuine <corecrt.h> produces for this target:
+#
+#   _CRT_HYBRIDPATCHABLE  is `__declspec(hybrid_patchable)` only under
+#       `defined _DLL && (defined _M_HYBRID || defined _M_ARM64EC) && (defined _CORECRT_BUILD ||
+#        defined _VCRT_BUILD)`, and empty otherwise. This build is /MT (no `_DLL`, and that is a
+#       hard requirement -- see the CMAKE_MSVC_RUNTIME_LIBRARY note below), targets x86_64 (no
+#       `_M_HYBRID`/`_M_ARM64EC`; hybrid-patchable is an ARM64EC/CHPE thunking concept with no
+#       meaning on x64), and is not a CRT-internal build. All three conjuncts fail, so the macro
+#       is empty on every SDK that defines it. Empty is bit-identical to the native build.
+#   _CRT_NOEXCEPT         is `noexcept` under `__cplusplus` and empty otherwise. The amalgamation
+#       is compiled as C (/std:c11), so empty is the correct expansion -- which is why these are
+#       added to CMAKE_C_FLAGS_INIT only and deliberately NOT to CMAKE_CXX_FLAGS_INIT: newer SDKs
+#       define it inside `#ifndef _CRT_NOEXCEPT`, so a command-line definition would win and strip
+#       `noexcept` off every CRT declaration in every C++ TU.
+#   _CRT_GUARDOVERFLOW    is `__declspec(guard(overflow))` only under
+#       `_GUARDOVERFLOW_CRT_ALLOCATORS` (set by /sdl), empty otherwise. This build does not pass
+#       /sdl. It is included pre-emptively because it appears in the parameter lists of the same
+#       mimalloc override block, past the point where clang's error recovery stopped reporting.
+#
+# Where the SDK does define these, its `#define` is an identical (empty) replacement list, so C11
+# 6.10.3p2 makes the redefinition silent -- there is no macro-redefinition diagnostic to suppress.
+#
+# Deliberately NOT defined here: `_CRTRESTRICT` and `_CRT_JIT_INTRINSIC`. Those have non-empty
+# expansions in the splat's headers (the compiler error lands on the `_CRT_HYBRIDPATCHABLE` token,
+# not on the `_ACRTIMP`/`_CRTALLOCATOR` that precede it, which proves the ucrt <corecrt.h> is
+# present and modern enough to define that family), and clobbering them would change codegen.
+set(_llvm_ld_crt_macro_shims
+  "-D_CRT_HYBRIDPATCHABLE="
+  "-D_CRT_NOEXCEPT="
+  "-D_CRT_GUARDOVERFLOW=")
+string(JOIN " " _llvm_ld_crt_macro_shims_joined ${_llvm_ld_crt_macro_shims})
+
+set(CMAKE_C_FLAGS_INIT "${_llvm_ld_imsvc_flags_joined} ${_llvm_ld_crt_macro_shims_joined}")
 set(CMAKE_CXX_FLAGS_INIT "${_llvm_ld_imsvc_flags_joined}")
 
 # /manifest:no: CMake 3.31+ prefers llvm-mt for clang-cl targets, and this repo builds with
