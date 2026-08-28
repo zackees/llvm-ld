@@ -76,7 +76,11 @@ jobs:
       # cross-only header drift. WinMsvcCross.cmake also defines those macros empty as a backstop.
       LLVM_LD_XWIN_SDK_VERSION: "10.0.26100"
       LLVM_LD_XWIN_CRT_VERSION: "14.44.17.14"
-      LLVM_LD_XWIN_ROOT: ${{ github.workspace }}/xwin-splat
+      # Outside the checkout on purpose. The splat is a toolchain sysroot, exactly like the MSVC
+      # install the native Windows job compiles against, and that one sits outside the source tree
+      # so the closure audit never sees its headers as build source reads. Keeping the splat inside
+      # the workspace would instead require exempting it, which would blunt the audit.
+      LLVM_LD_XWIN_ROOT: ${{ runner.temp }}/xwin-splat
     steps:
       - uses: actions/checkout@v4
       - uses: mozilla-actions/sccache-action@v0.0.11
