@@ -27,7 +27,10 @@ def main() -> int:
         "cmake":(source/"cmake").resolve(),
         "mimalloc":mimalloc_root,
     }
-    allowed_files={(source/"CMakeLists.txt").resolve()}
+    # exports.map is the ELF version script the shared-library link reads directly; it is a
+    # first-party input like CMakeLists.txt, so it is declared and hashed into the inventory
+    # rather than exempted.
+    allowed_files={(source/"CMakeLists.txt").resolve(),(source/"exports.map").resolve()}
     # LLVM's find_first_existing_vc_file (AddLLVM.cmake) makes this checkout's .git/logs/HEAD a
     # dependency of the generated VCSRevision.h so the revision stamp refreshes on commit. That is
     # VCS metadata, not build source: no byte of it is compiled or included, so exempting it does
