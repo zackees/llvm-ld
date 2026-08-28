@@ -205,6 +205,9 @@ jobs:
           mkdir -p stage
           cp build-cross/llvm_ld.dll stage/
           cp build-cross/abi_smoke.exe build-cross/abi_contract.exe build-cross/abi_state_test.exe build-cross/allocator-probe.exe stage/
+          # windows_manifest_merge.ps1 drives a real link through the wrapper, so the runner has
+          # to be staged too, not just the ABI test binaries.
+          cp build-cross/llvm-ld-runner.exe stage/
       - uses: actions/upload-artifact@v4
         with:
           name: linux-cross-stage
@@ -228,6 +231,10 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           python tools/verify.py --root .
           ./tools/run_staged_tests.ps1 -Stage ./stage
+          # The cross lane is where the vendored libxml2 is most likely to break, since clang-cl
+          # compiles it against the xwin sysroot rather than a real MSVC install. Prove the
+          # cross-built DLL merges manifests in-process, not just that it loads.
+          ./tests/windows_manifest_merge.ps1 -BuildDir ./stage
   build-windows:
     runs-on: windows-2025
     env:

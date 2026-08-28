@@ -39,6 +39,12 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           ./tests/gold_link.ps1 -BuildDir build
+      - name: In-process manifest merge (no external mt.exe)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          ./tests/windows_manifest_merge.ps1 -BuildDir build
       - name: Triage gold link failure
         if: failure()
         shell: pwsh

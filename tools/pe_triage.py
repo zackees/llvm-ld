@@ -78,6 +78,65 @@ def run_tool(args: list[str]) -> str | None:
         return f"<{args[0]} failed to run: {e}>"
     return proc.stdout + proc.stderr
 
+RT_MANIFEST = 24
+
+def rva_to_offset(layout: PeLayout, rva: int) -> int:
+    for s in layout.sections:
+        if s.virtual_address <= rva < s.virtual_address + s.raw_size:
+            return s.raw_offset + (rva - s.virtual_address)
+    raise ValueError(f"RVA {rva:#x} not covered by any section")
+
+def find_rsrc_section(layout: PeLayout) -> Section:
+    for s in layout.sections:
+        if s.name == ".rsrc":
+            return s
+    raise ValueError("no .rsrc section (PE has no embedded resources)")
+
+# Minimal IMAGE_RESOURCE_DIRECTORY walk, three levels deep (Type -> Name -> Language), matching
+# the layout lld-link's writeResEntryHeader produces: RT_MANIFEST at the type level, the manifest
+# ID (1 for the default EXE resource) at the name level, and a single language leaf below that.
+# Named entries (high bit set on Id/NameOffset) are skipped since resources of interest here are
+# always numeric IDs.
+def read_resource_directory(data: bytes, rsrc: Section, dir_offset: int) -> list[tuple[int, int]]:
+    base = rsrc.raw_offset
+    named_count, id_count = struct.unpack_from("<HH", data, base + dir_offset + 12)
+    entries = []
+    entry_off = base + dir_offset + 16 + named_count * 8
+    for i in range(id_count):
+        eid, value = struct.unpack_from("<II", data, entry_off + i * 8)
+        entries.append((eid, value))
+    return entries
+
+def extract_manifest_bytes(data: bytes, layout: PeLayout, resource_id: int | None) -> bytes:
+    rsrc = find_rsrc_section(layout)
+    type_entries = read_resource_directory(data, rsrc, 0)
+    type_match = [v for (eid, v) in type_entries if eid == RT_MANIFEST]
+    if not type_match:
+        raise ValueError(f"no RT_MANIFEST (type {RT_MANIFEST}) entry in .rsrc directory")
+    # High bit of the subdirectory offset marks "points to another directory" rather than a leaf.
+    name_dir_offset = type_match[0] & 0x7FFFFFFF
+    name_entries = read_resource_directory(data, rsrc, name_dir_offset)
+    if resource_id is not None:
+        name_match = [v for (eid, v) in name_entries if eid == resource_id]
+        if not name_match:
+            ids = ", ".join(str(eid) for eid, _ in name_entries)
+            raise ValueError(f"resource id {resource_id} not found under RT_MANIFEST (have: {ids})")
+    else:
+        if not name_entries:
+            raise ValueError("RT_MANIFEST type directory has no name entries")
+        name_match = [name_entries[0][1]]
+    lang_dir_offset = name_match[0] & 0x7FFFFFFF
+    lang_entries = read_resource_directory(data, rsrc, lang_dir_offset)
+    if not lang_entries:
+        raise ValueError("RT_MANIFEST name directory has no language entries")
+    leaf_offset = lang_entries[0][1]
+    if leaf_offset & 0x80000000:
+        raise ValueError("expected a leaf data entry at the language level, found another subdirectory")
+    leaf_base = rsrc.raw_offset + leaf_offset
+    data_rva, data_size = struct.unpack_from("<II", data, leaf_base)
+    file_off = rva_to_offset(layout, data_rva)
+    return data[file_off:file_off + data_size]
+
 def print_section(title: str) -> None:
     print(f"\n=== {title} ===")
 
@@ -153,10 +212,40 @@ def triage_pdb(left: pathlib.Path, right: pathlib.Path, first_offset: int | None
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("left", type=pathlib.Path)
-    p.add_argument("right", type=pathlib.Path)
+    p.add_argument("right", type=pathlib.Path, nargs="?")
     p.add_argument("--left-pdb", type=pathlib.Path, default=None)
     p.add_argument("--right-pdb", type=pathlib.Path, default=None)
+    p.add_argument("--extract-manifest", action="store_true",
+                    help="extract the embedded RT_MANIFEST resource from 'left' instead of diffing "
+                         "left vs right; writes to --out (or stdout, text-decoded, if omitted)")
+    p.add_argument("--resource-id", type=int, default=None,
+                    help="manifest resource (name) id to extract; defaults to the first one found "
+                         "(the default EXE manifest resource id is 1)")
+    p.add_argument("--out", type=pathlib.Path, default=None,
+                    help="--extract-manifest: file to write the extracted manifest bytes to")
     args = p.parse_args()
+
+    if args.extract_manifest:
+        if not args.left.is_file():
+            print(f"error: not a file: {args.left}", file=sys.stderr)
+            return 1
+        try:
+            data = args.left.read_bytes()
+            layout = parse_pe_sections(data)
+            manifest = extract_manifest_bytes(data, layout, args.resource_id)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        if args.out:
+            args.out.write_bytes(manifest)
+            print(f"wrote {len(manifest)} bytes to {args.out}")
+        else:
+            sys.stdout.write(manifest.decode("utf-8", errors="replace"))
+        return 0
+
+    if args.right is None:
+        print("error: 'right' is required unless --extract-manifest is given", file=sys.stderr)
+        return 1
 
     for f in (args.left, args.right):
         if not f.is_file():

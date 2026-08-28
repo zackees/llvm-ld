@@ -13,10 +13,12 @@ def main() -> int:
     root=a.root.resolve(); locked=(root/"cmake"/"LockedInputs.cmake").read_text()
     required={"LLVM_LD_LLVM_COMMIT":"ea7d852a70e8bdfaf601d6626a760f9771b2c4b4",
               "LLVM_LD_MIMALLOC_VERSION":"0.9.5",
-              "LLVM_LD_MIMALLOC_SHA256":"9143eb24178e618a9671d22074e2e64badd61454a1ae5c042325daf8238f5407"}
+              "LLVM_LD_MIMALLOC_SHA256":"9143eb24178e618a9671d22074e2e64badd61454a1ae5c042325daf8238f5407",
+              "LLVM_LD_LIBXML2_VERSION":"2.15.3",
+              "LLVM_LD_LIBXML2_SHA256":"78262a6e7ac170d6528ebfe2efccdf220191a5af6a6cd61ea4a9a9a5042c7a07"}
     for key,value in required.items():
         if not re.search(rf'set\({key} "{re.escape(value)}"\)', locked): raise SystemExit(f"bad lock: {key}")
-    for path in ["LICENSE","LICENSE-LLVM.txt","LICENSE-MIMALLOC.txt","PROVENANCE.md","include/llvm_ld.h"]:
+    for path in ["LICENSE","LICENSE-LLVM.txt","LICENSE-MIMALLOC.txt","LICENSE-LIBXML2.txt","PROVENANCE.md","include/llvm_ld.h"]:
         if not (root/path).is_file(): raise SystemExit(f"missing required attribution: {path}")
     llvm_manifest=json.loads((root/"provenance"/"llvm-source-closure.json").read_text())
     llvm_root=root/"llvm-project"; actual_llvm={}
@@ -47,6 +49,11 @@ def main() -> int:
     if inv.exists():
         for rel,want in json.loads(inv.read_text()).items():
             path=root/"upstream"/"mimalloc-pprof-0.9.5"/rel
+            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest()!=want: raise SystemExit(f"drift: {rel}")
+    xml2_inv=root/"provenance"/"libxml2-files.json"
+    if xml2_inv.exists():
+        for rel,want in json.loads(xml2_inv.read_text()).items():
+            path=root/"upstream"/"libxml2-2.15.3"/rel
             if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest()!=want: raise SystemExit(f"drift: {rel}")
     cmake=(root/"CMakeLists.txt").read_text()
     allocator_contract(cmake)

@@ -27,9 +27,33 @@ set(LLVM_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 set(LLD_BUILD_TOOLS ON CACHE BOOL "" FORCE)
 set(LLVM_ENABLE_ZLIB OFF CACHE BOOL "" FORCE)
 set(LLVM_ENABLE_ZSTD OFF CACHE BOOL "" FORCE)
-set(LLVM_ENABLE_LIBXML2 OFF CACHE BOOL "" FORCE)
+# Vendored static libxml2 so LLVM's WindowsManifest library can merge Windows manifests
+# in-process instead of shelling out to mt.exe. See cmake/VendoredLibXml2.cmake for the target
+# (LibXml2::LibXml2) and cmake/find-shims/FindLibXml2.cmake for why a shim module is needed at all.
+# Prepend (not append) so our shim shadows CMake's builtin FindLibXml2.cmake.
+list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/find-shims")
+include(cmake/VendoredLibXml2.cmake)
+# FORCE_ON (not plain ON): llvm/cmake/config-ix.cmake treats FORCE_ON as "find_package(LibXml2
+# REQUIRED) or fail the configure", whereas plain ON silently falls back to LLVM_ENABLE_LIBXML2=OFF
+# (and therefore mt.exe) if find_package/the symbol check fails. We need a hard failure here: a
+# silently broken shim must not quietly regress lld back to shelling out to mt.exe.
+set(LLVM_ENABLE_LIBXML2 FORCE_ON CACHE STRING "" FORCE)
+set(LLVM_USE_STATIC_LIBXML2 OFF CACHE BOOL "" FORCE)
+# llvm/cmake/config-ix.cmake's check_symbol_exists(xmlReadMemory ... HAVE_LIBXML2) try-links
+# against LibXml2::LibXml2 at configure time, but llvm_ld_xml2 hasn't been built yet (it's an
+# in-tree target, not a preexisting archive on disk) -- the try-link would fail even though the
+# real build will succeed once llvm_ld_xml2 is built. CheckSymbolExists.cmake guards its whole body
+# with `if(NOT DEFINED "${VARIABLE}" ...)`, so pre-seeding the cache variable short-circuits the
+# probe entirely. This is sound because the library really is built in-tree from our own vendored
+# sources and the real build (not this probe) is what proves usability.
+set(HAVE_LIBXML2 1 CACHE INTERNAL "libxml2 is vendored and built in-tree; see cmake/VendoredLibXml2.cmake")
 set(LLVM_ENABLE_TERMINFO OFF CACHE BOOL "" FORCE)
 add_subdirectory("${LLVM_LD_LLVM_ROOT}/llvm" llvm EXCLUDE_FROM_ALL)
+# Imported targets carry no build ordering (see cmake/VendoredLibXml2.cmake), so LLVMWindowsManifest
+# must be told explicitly to wait on our vendored libxml2 archive. Must come after the
+# add_subdirectory() above: LLVMWindowsManifest does not exist until llvm/lib/WindowsManifest's own
+# CMakeLists.txt has run.
+add_dependencies(LLVMWindowsManifest llvm_ld_xml2)
 
 add_library(llvm_ld SHARED src/llvm_ld.cpp)
 if(LLVM_LD_USE_MIMALLOC)

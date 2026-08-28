@@ -83,6 +83,29 @@ configuration performs no
 LLVM network acquisition. Windows acceptance rejects any closure drift and publishes the fresh
 inventory; Linux publishes its platform-specific inventory and both reject undeclared reads.
 
+## Vendored libxml2 (in-process Windows manifest merging)
+
+libxml2 2.15.3 is vendored as a pinned static dependency so `LLVM_ENABLE_LIBXML2=ON` and
+`llvm::windows_manifest::isAvailable()` returns true, which makes lld's COFF driver merge
+`/manifestinput:` fragments in-process through `WindowsManifestMerger` instead of falling back to
+`createManifestXmlWithExternalMt()`, which shells out to `mt.exe` from the Windows SDK and fails
+outright when that tool is not on PATH. This removes a runtime dependency on an external SDK tool
+for a feature this repository otherwise implements entirely from vendored/pinned sources. The
+source archive is `https://download.gnome.org/sources/libxml2/2.15/libxml2-2.15.3.tar.xz`, SHA-256
+`78262a6e7ac170d6528ebfe2efccdf220191a5af6a6cd61ea4a9a9a5042c7a07`, verified against GNOME's
+published `.sha256sum`. Only a minimal feature set is compiled: output, threads, and push parsing
+are on; html, catalog, xpath, xinclude, reader, writer, regexp, schemas, relaxng, c14n, http,
+iconv, icu, zlib, and modules are all off, since none of them are needed to parse and serialize the
+small manifest fragments this merge path handles. It is built as a static library linked with the
+static CRT, matching the rest of this repository's MSVC configuration, so no external DLL is
+introduced and no allocation crosses a CRT boundary that mimalloc does not own. Zero upstream LLVM
+files are patched to wire this in; libxml2 is an added, pinned dependency, not a source delta to
+the payload described above. Because `WindowsManifestMerger` serializes by walking libxml2's
+document-order linked lists, merged output is deterministic at a pinned libxml2 version but is not
+guaranteed byte-stable across libxml2 versions, so anything that checks the exact bytes of a merged
+manifest against `tests/manifest_input.manifest` (or a fixture like it) is coupled to this pinned
+version and must be reviewed whenever libxml2 is bumped.
+
 ## Cross-compilation provenance (Linux -> x86_64-pc-windows-msvc)
 
 `build-linux-cross` produces `llvm_ld.dll` on an ubuntu-24.04 runner using clang-cl + lld-link +
