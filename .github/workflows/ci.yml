@@ -159,7 +159,7 @@ jobs:
         run: |
           ninja -C build-cross -t inputs llvm_ld > build-cross-inputs.txt
           ninja -C build-cross -t deps > build-cross-deps.txt
-          python tools/audit_build.py --source . --build build-cross --ninja-inputs build-cross-inputs.txt --ninja-deps build-cross-deps.txt --cmake-trace cmake-trace-cross.jsonl --expected-llvm-closure provenance/llvm-source-closure.json --output source-closure-linux-cross.json
+          python tools/audit_build.py --source . --build build-cross --ninja-inputs build-cross-inputs.txt --ninja-deps build-cross-deps.txt --cmake-trace cmake-trace-cross.jsonl --expected-llvm-closure provenance/llvm-source-closure.json --native-tool-dir build-tblgen/bin --output source-closure-linux-cross.json
       - uses: actions/upload-artifact@v4
         with:
           name: linux-cross-source-closure

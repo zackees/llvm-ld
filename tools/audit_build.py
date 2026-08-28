@@ -13,7 +13,7 @@ def looks_like_path(value: str) -> bool:
     # raises ENAMETOOLONG instead of answering False.
     return bool(value) and "\n" not in value and "\x00" not in value and len(value)<=4096
 def main() -> int:
-    p=argparse.ArgumentParser(); p.add_argument("--source",type=pathlib.Path,required=True); p.add_argument("--build",type=pathlib.Path,required=True); p.add_argument("--ninja-inputs",type=pathlib.Path,required=True); p.add_argument("--ninja-deps",type=pathlib.Path); p.add_argument("--output",type=pathlib.Path,required=True); p.add_argument("--cmake-trace",type=pathlib.Path); p.add_argument("--expected-llvm-closure",type=pathlib.Path); a=p.parse_args()
+    p=argparse.ArgumentParser(); p.add_argument("--source",type=pathlib.Path,required=True); p.add_argument("--build",type=pathlib.Path,required=True); p.add_argument("--ninja-inputs",type=pathlib.Path,required=True); p.add_argument("--ninja-deps",type=pathlib.Path); p.add_argument("--output",type=pathlib.Path,required=True); p.add_argument("--cmake-trace",type=pathlib.Path); p.add_argument("--expected-llvm-closure",type=pathlib.Path); p.add_argument("--native-tool-dir",type=pathlib.Path); a=p.parse_args()
     source=a.source.resolve(); build=a.build.resolve()
     commands=json.loads((build/"compile_commands.json").read_text(encoding="utf-8"))
     if not commands: raise SystemExit("empty compile database")
@@ -32,6 +32,9 @@ def main() -> int:
         "cmake":(source/"cmake").resolve(),
         "mimalloc":mimalloc_root,
     }
+    # A cross build runs TableGen from a separate native stage-1 build tree, so those executables
+    # are read as generator tools. They are build outputs of the same pinned payload, not source.
+    if a.native_tool_dir: allowed["native-tools"]=a.native_tool_dir.resolve()
     # exports.map is the ELF version script the shared-library link reads directly; it is a
     # first-party input like CMakeLists.txt, so it is declared and hashed into the inventory
     # rather than exempted.
