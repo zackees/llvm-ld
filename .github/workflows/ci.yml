@@ -219,6 +219,9 @@ jobs:
         with:
           name: linux-cross-stage
           path: stage
+      # verify.py checks the mimalloc payload too, and this job never configures, so nothing has
+      # fetched it. Import it first, exactly as the provenance job does.
+      - run: python tools/import.py --mimalloc-only
       - shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
