@@ -34,9 +34,11 @@ consumes to generate TargetParser headers, `llvm/utils/TableGen` itself (builds 
 the full linked closure named above (MC, Object, DebugInfo/{PDB,CodeView,MSF,DWARF}, LTO, Passes,
 Transforms, Target/X86, Demangle, WindowsDriver, WindowsManifest, Option, Support).
 
-Beyond deletion and restoration, exactly five upstream CMake files are patched, and they are this
-repository's only upstream source deltas — every other retained file stays byte-identical to
-upstream. `llvm-project/lld/CMakeLists.txt` has the `add_subdirectory` calls for `tools/lld`,
+Beyond deletion and restoration, exactly five upstream CMake files are patched to make the pruned
+tree configure, and a further six source files carry link-speed patches (next section). Those
+eleven files are this repository's only upstream source deltas — every other retained file stays
+byte-identical to upstream, and every patched file is declared in `provenance/payload-prune.json`
+under `patched`. `llvm-project/lld/CMakeLists.txt` has the `add_subdirectory` calls for `tools/lld`,
 `docs`, `ELF`, `MachO`, and `wasm` removed. `llvm-project/llvm/lib/CMakeLists.txt` has the
 `add_subdirectory` calls for the pruned `llvm/lib/*` directories removed.
 `llvm-project/llvm/lib/DebugInfo/CMakeLists.txt` has the `add_subdirectory` call for pruned
@@ -48,6 +50,23 @@ pruned `ObjectYAML` component dropped; `LLVMFrontendOffloading` is configured bu
 lldCOFF/lldMinGW/lldCommon link closure, so this could not be caught by that link graph. The
 latter two patches were needed because kept directories referenced pruned components and configure
 failed without them.
+
+### Link-speed patches
+
+Six source files are patched to make COFF linking faster without changing a single output byte.
+They are declared in `provenance/payload-prune.json` under `patched` with a one-line reason each:
+`lld/COFF/PDB.cpp`, `lld/COFF/InputFiles.cpp`, `lld/COFF/InputFiles.h`, `lld/COFF/Writer.cpp`,
+`llvm/lib/DebugInfo/PDB/Native/GSIStreamBuilder.cpp`, and `llvm/lib/Support/CRC.cpp`. The changes
+are all of the form "do the same work in parallel, then publish the results serially in input
+order" or "do the same work with less overhead" (batched stream writes, a slice-by-8 CRC-32 with
+the same polynomial); none alters what is written. The output contract is enforced two ways: the
+Windows gold link tests below compare against the pinned stock `lld-link` byte-for-byte, and
+`tests/perf/bench.py` refuses to report a timing until the candidate's EXE and PDB are
+byte-identical to a baseline build of the unpatched payload and self-deterministic across runs.
+
+After editing a declared patched file, run `python tools/refresh_patched_closure.py`: it recomputes
+`provenance/llvm-source-closure.json` for exactly the declared files and fails if any undeclared
+payload file has drifted, so `tools/verify.py` keeps its full authority over everything else.
 
 The allocator payload is the crates.io `mimalloc-pprof` 0.9.5 archive whose SHA-256 is
 `9143eb24178e618a9671d22074e2e64badd61454a1ae5c042325daf8238f5407`. `tools/import.py` verifies

@@ -40,6 +40,53 @@ the correctness gate. Binary-size/build-time wins in those directories come from
 `.ignore` at the repo root hides the inert directories from `rg`/Grep by default. Use an
 explicit path (or `rg --no-ignore`) when you actually need to read LLVM optimizer/backend code.
 
+## Link-speed work: harness and workflow
+
+- Corpora: `python tests/perf/gen_corpus.py --out build-perf/corpus --profile small|medium|large`
+  (deterministic freestanding C++ compiled by clang to MSVC COFF with CodeView; no SDK needed).
+- Baseline: build the unpatched payload once and copy `llvm-ld-direct` to `build-perf/baseline/`.
+  Every candidate is gated against it: `python tests/perf/bench.py --candidate build/llvm-ld-direct
+  --baseline build-perf/baseline/llvm-ld-direct --corpus build-perf/corpus/large`. The gate
+  requires byte-identical EXE and PDB and self-determinism before it prints timings; `--time`
+  prints lld's `/time` phase breakdown; `--time-trace=<file>` on the linker itself gives
+  per-scope wall time (aggregate by name).
+- On Linux, `lld-link` output is host-independent, so the whole loop (build, profile with `perf`,
+  gate, measure) runs locally; Windows CI only confirms.
+- Payload files with perf patches are declared in `provenance/payload-prune.json` (`patched`).
+  After editing one, run `python tools/refresh_patched_closure.py` and then `tools/verify.py`.
+- Race-check parallel changes with a ThreadSanitizer build before merging:
+  `cmake -S . -B build-tsan -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_APPEND_VC_REV=OFF
+  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DLLVM_USE_SANITIZER=Thread
+  -DLLVM_LD_USE_MIMALLOC=OFF -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=thread
+  -DCMAKE_SHARED_LINKER_FLAGS=-fsanitize=thread`. The two linker-flag settings are required:
+  `LLVM_USE_SANITIZER` only puts `-fsanitize=thread` on compiles here, so links fail with
+  undefined `__tsan_*` without them.
+- Two measurement traps, both of which produced bogus numbers before being caught:
+  1. **Never compare links written to different output paths.** lld embeds the linker command
+     line in the PDB's `* Linker *` module and the PDB name in the EXE debug directory, so
+     differing `/out:`/`/pdb:` names alone change the bytes. `bench.py` links everything to one
+     path for this reason.
+  2. **A/B an individual change against the previous candidate, not against the original
+     baseline.** Baseline wall time drifts several percent between sessions, which is larger than
+     most single changes. Copy the current binary aside, apply the change, rebuild, and run
+     `bench.py --candidate <new> --baseline <old>`; both produce identical bytes so the gate still
+     applies. A block-write coalescing change looked like +3% against the original baseline and
+     was **-2.5%** in a direct A/B; it was dropped. Cross-check any claimed win against the
+     `--time-trace` phase it was supposed to move.
+  3. **Never benchmark while a build is running.** A concurrent 16-core build made the patched
+     linker look 10% *slower* single-threaded; on an idle machine it is 17% faster. Check
+     `uptime` load first.
+- Things already done (Sep 2026): parallel PDB symbol-merging analysis, parallel section-
+  contribution CRCs, PROCREF pre-serialization, parallel publics collection + serialization,
+  batched GSI writes, deferred parallel `.debug$S` flag scan, slice-by-8 CRC-32, cwd caching in
+  `pdbMakeAbsolute`. Result: +46% wall at default threads, +17% at `/threads:1`, on 2048 objects.
+- Remaining hot spots on the large corpus (default threads): the PDB output buffer `commit()`
+  (~95 ms, msync of a 115 MB mapping — I/O bound; forcing an in-memory buffer with `F_mmap` was
+  measurably *worse*, do not retry), `Read input files` (~150 ms; on Linux
+  `createFutureForFile` uses `std::launch::deferred` so reads are serial, but on Windows it is
+  already `std::launch::async`), `Commit DBI stream` (~52 ms), `ObjFile::initializeSymbols`
+  (~80 ms, serial symbol-table insertion).
+
 ## Correctness constraints on any optimization
 
 - `tests/gold_link.ps1` / `tests/windows_correctness.ps1` require byte-identical output against

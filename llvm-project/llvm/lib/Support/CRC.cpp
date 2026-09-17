@@ -72,10 +72,50 @@ static const uint32_t CRCTable[256] = {
     0x54de5729, 0x23d967bf, 0xb3667a2e, 0xc4614ab8, 0x5d681b02, 0x2a6f2b94,
     0xb40bbe37, 0xc30c8ea1, 0x5a05df1b, 0x2d02ef8d};
 
+// Slice-by-8: process eight input bytes per step using eight derived tables,
+// each of which advances the CRC by one more byte than the previous one. The
+// result is identical to the byte-at-a-time loop over CRCTable; only the
+// number of table lookups per byte changes (1 per byte, but 8 bytes in
+// flight instead of a strict per-byte dependency chain).
+namespace {
+struct CRCSliceTables {
+  uint32_t T[8][256];
+  constexpr CRCSliceTables() : T{} {
+    for (uint32_t I = 0; I < 256; ++I) {
+      uint32_t C = I;
+      for (int K = 0; K < 8; ++K)
+        C = (C & 1) ? 0xEDB88320U ^ (C >> 1) : C >> 1;
+      T[0][I] = C;
+    }
+    for (int J = 1; J < 8; ++J)
+      for (uint32_t I = 0; I < 256; ++I)
+        T[J][I] = (T[J - 1][I] >> 8) ^ T[0][T[J - 1][I] & 0xff];
+  }
+};
+constexpr CRCSliceTables SliceTables;
+
+inline uint32_t readLE32(const uint8_t *P) {
+  return uint32_t(P[0]) | (uint32_t(P[1]) << 8) | (uint32_t(P[2]) << 16) |
+         (uint32_t(P[3]) << 24);
+}
+} // namespace
+
 uint32_t llvm::crc32(uint32_t CRC, ArrayRef<uint8_t> Data) {
   CRC ^= 0xFFFFFFFFU;
-  for (uint8_t Byte : Data) {
-    int TableIdx = (CRC ^ Byte) & 0xff;
+  const uint8_t *P = Data.data();
+  size_t N = Data.size();
+  const uint32_t(*T)[256] = SliceTables.T;
+  while (N >= 8) {
+    uint32_t One = readLE32(P) ^ CRC;
+    uint32_t Two = readLE32(P + 4);
+    CRC = T[7][One & 0xff] ^ T[6][(One >> 8) & 0xff] ^
+          T[5][(One >> 16) & 0xff] ^ T[4][One >> 24] ^ T[3][Two & 0xff] ^
+          T[2][(Two >> 8) & 0xff] ^ T[1][(Two >> 16) & 0xff] ^ T[0][Two >> 24];
+    P += 8;
+    N -= 8;
+  }
+  while (N--) {
+    int TableIdx = (CRC ^ *P++) & 0xff;
     CRC = CRCTable[TableIdx] ^ (CRC >> 8);
   }
   return CRC ^ 0xFFFFFFFFU;

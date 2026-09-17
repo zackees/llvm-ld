@@ -19,3 +19,6 @@
 /msvc-*.exe
 /msvc-*.pdb
 /mingw-*.exe
+/build-perf/
+/build-*.log
+/build-tsan/

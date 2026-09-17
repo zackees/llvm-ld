@@ -150,6 +150,17 @@ public:
 
   static bool classof(const InputFile *f) { return f->kind() == ObjectKind; }
   void parse() override;
+
+  /// parse() defers scanning .debug$S for S_OBJNAME/S_COMPILE3 (see
+  /// initializeFlags) unless the object is a precompiled-header object whose
+  /// signature initializeDependencies needs right away. The writer runs this
+  /// for every object in parallel before anything reads the results.
+  void finishDeferredFlags() {
+    if (flagsDeferred) {
+      flagsDeferred = false;
+      initializeFlags();
+    }
+  }
   void parseLazy();
   MachineTypes getMachineType() const override;
   ArrayRef<Chunk *> getChunks() { return chunks; }
@@ -246,6 +257,9 @@ private:
   void initializeFlags();
   void initializeDependencies();
   void initializeECThunks();
+
+  /// True while initializeFlags() has been deferred to finishDeferredFlags().
+  bool flagsDeferred = false;
 
   SectionChunk *
   readSection(uint32_t sectionNumber,

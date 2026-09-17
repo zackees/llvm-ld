@@ -175,11 +175,15 @@ void GSIStreamBuilder::finalizeGlobalBuckets(uint32_t RecordZeroOffset) {
   // The dead fields are Offset, Segment, and Flags.
   std::vector<BulkPublic> Records;
   Records.resize(Globals.size());
-  uint32_t SymOffset = RecordZeroOffset;
-  for (size_t I = 0, E = Globals.size(); I < E; ++I) {
+  // Extracting each record's name means parsing the record; do that in
+  // parallel and only run the offset prefix sum serially.
+  parallelFor(0, Globals.size(), [&](size_t I) {
     StringRef Name = getSymbolName(Globals[I]);
     Records[I].Name = Name.data();
     Records[I].NameLen = Name.size();
+  });
+  uint32_t SymOffset = RecordZeroOffset;
+  for (size_t I = 0, E = Globals.size(); I < E; ++I) {
     Records[I].SymOffset = SymOffset;
     SymOffset += Globals[I].length();
   }
@@ -378,25 +382,43 @@ void GSIStreamBuilder::addGlobalSymbol(const codeview::CVSymbol &Symbol) {
   Globals.push_back(Symbol);
 }
 
-// Serialize each public and write it.
+// Serialize each public and write it. Publics already carry their record
+// offsets (assigned in addPublicSymbols), so all of them are serialized into
+// one buffer in parallel and written with a single call.
 static Error writePublics(BinaryStreamWriter &Writer,
                           ArrayRef<BulkPublic> Publics) {
-  std::vector<uint8_t> Storage;
-  for (const BulkPublic &Pub : Publics) {
-    Storage.resize(sizeOfPublic(Pub));
-    serializePublic(Storage.data(), Pub);
-    if (Error E = Writer.writeBytes(Storage))
-      return E;
-  }
-  return Error::success();
+  if (Publics.empty())
+    return Error::success();
+  const BulkPublic &Last = Publics.back();
+  std::vector<uint8_t> Buffer(size_t(Last.SymOffset) + sizeOfPublic(Last));
+  parallelFor(0, Publics.size(), [&](size_t I) {
+    serializePublic(Buffer.data() + Publics[I].SymOffset, Publics[I]);
+  });
+  return Writer.writeBytes(Buffer);
 }
+
+// Every write to the underlying MSF stream is split along block boundaries
+// and goes through the block map, so writing hundreds of thousands of small
+// records one at a time is dominated by that overhead. Gather records into a
+// buffer of this size and write it in one go instead.
+static constexpr size_t RecordWriteBatchBytes = 1 << 20;
 
 static Error writeRecords(BinaryStreamWriter &Writer,
                           ArrayRef<CVSymbol> Records) {
-  BinaryItemStream<CVSymbol> ItemStream(llvm::endianness::little);
-  ItemStream.setItems(Records);
-  BinaryStreamRef RecordsRef(ItemStream);
-  return Writer.writeStreamRef(RecordsRef);
+  std::vector<uint8_t> Batch;
+  Batch.reserve(RecordWriteBatchBytes);
+  for (const CVSymbol &Record : Records) {
+    ArrayRef<uint8_t> Data = Record.data();
+    if (Batch.size() + Data.size() > RecordWriteBatchBytes && !Batch.empty()) {
+      if (Error E = Writer.writeBytes(Batch))
+        return E;
+      Batch.clear();
+    }
+    Batch.insert(Batch.end(), Data.begin(), Data.end());
+  }
+  if (!Batch.empty())
+    return Writer.writeBytes(Batch);
+  return Error::success();
 }
 
 Error GSIStreamBuilder::commitSymbolRecordStream(

@@ -355,7 +355,14 @@ void ObjFile::parse() {
   // Read section and symbol tables.
   initializeChunks();
   initializeSymbols();
-  initializeFlags();
+  // initializeFlags only feeds hotPatchable (read by the writer) and the
+  // S_OBJNAME signature, which only a precompiled-header object needs before
+  // initializeDependencies runs. Every other object is scanned later, in
+  // parallel, by finishDeferredFlags(); see Writer::run.
+  if (symtab.ctx.config.debug && !getDebugSection(".debug$P").empty())
+    initializeFlags();
+  else
+    flagsDeferred = true;
   initializeDependencies();
   initializeECThunks();
 }
@@ -987,14 +994,24 @@ void ObjFile::initializeFlags() {
   if (data.empty())
     return;
 
-  DebugSubsectionArray subsections;
+  // Walk the subsection headers and record prefixes directly instead of going
+  // through the stream readers. clang emits a symbols subsection per function,
+  // so this touches a couple of hundred records per object, and the reader
+  // overhead per record adds up across a large link. Only the S_OBJNAME and
+  // S_COMPILE3 records themselves are deserialized. Truncation is handled the
+  // way the readers handle it: a truncated subsection header ends the walk, a
+  // truncated symbol record ends the whole scan.
+  uint64_t pos = 0;
+  while (data.size() - pos >= sizeof(DebugSubsectionHeader)) {
+    const auto *hdr =
+        reinterpret_cast<const DebugSubsectionHeader *>(data.data() + pos);
+    uint32_t len = hdr->Length;
+    if (data.size() - pos - sizeof(DebugSubsectionHeader) < len)
+      break;
+    ArrayRef<uint8_t> records = data.slice(pos + sizeof(DebugSubsectionHeader), len);
+    pos = alignTo(pos + sizeof(DebugSubsectionHeader) + len, 4);
 
-  BinaryStreamReader reader(data, llvm::endianness::little);
-  ExitOnError exitOnErr;
-  exitOnErr(reader.readArray(subsections, data.size()));
-
-  for (const DebugSubsectionRecord &ss : subsections) {
-    if (ss.kind() != DebugSubsectionKind::Symbols)
+    if (DebugSubsectionKind(uint32_t(hdr->Kind)) != DebugSubsectionKind::Symbols)
       continue;
 
     unsigned offset = 0;
@@ -1003,24 +1020,28 @@ void ObjFile::initializeFlags() {
     // and S_COMPILE3, and they usually appear at the beginning of the
     // stream.
     for (unsigned i = 0; i < 2; ++i) {
-      Expected<CVSymbol> sym = readSymbolFromStream(ss.getRecordData(), offset);
-      if (!sym) {
-        consumeError(sym.takeError());
+      if (records.size() - offset < sizeof(RecordPrefix))
         return;
-      }
-      if (sym->kind() == SymbolKind::S_COMPILE3) {
+      const auto *prefix =
+          reinterpret_cast<const RecordPrefix *>(records.data() + offset);
+      uint32_t recordLen = prefix->RecordLen;
+      if (recordLen < 2 ||
+          records.size() - offset < recordLen + sizeof(uint16_t))
+        return;
+      CVSymbol sym(records.slice(offset, recordLen + sizeof(uint16_t)));
+      if (sym.kind() == SymbolKind::S_COMPILE3) {
         auto cs =
-            cantFail(SymbolDeserializer::deserializeAs<Compile3Sym>(sym.get()));
+            cantFail(SymbolDeserializer::deserializeAs<Compile3Sym>(sym));
         hotPatchable =
             (cs.Flags & CompileSym3Flags::HotPatch) != CompileSym3Flags::None;
       }
-      if (sym->kind() == SymbolKind::S_OBJNAME) {
-        auto objName = cantFail(SymbolDeserializer::deserializeAs<ObjNameSym>(
-            sym.get()));
+      if (sym.kind() == SymbolKind::S_OBJNAME) {
+        auto objName =
+            cantFail(SymbolDeserializer::deserializeAs<ObjNameSym>(sym));
         if (objName.Signature)
           pchSignature = objName.Signature;
       }
-      offset += sym->length();
+      offset += sym.length();
     }
   }
 }
