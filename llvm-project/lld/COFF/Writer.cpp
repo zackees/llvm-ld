@@ -775,6 +775,12 @@ void Writer::run() {
     llvm::TimeTraceScope timeScope("Write PE");
     ScopedTimer t1(ctx.codeLayoutTimer);
 
+    // Object files defer their .debug$S flag scan (ObjFile::parse); this is
+    // the first point where anything reads hotPatchable, so complete it for
+    // every object now, in parallel.
+    parallelForEach(ctx.objFileInstances,
+                    [](ObjFile *file) { file->finishDeferredFlags(); });
+
     calculateStubDependentSizes();
     if (ctx.config.machine == ARM64X)
       ctx.dynamicRelocs = make<DynamicRelocsChunk>();

@@ -40,6 +40,26 @@ the correctness gate. Binary-size/build-time wins in those directories come from
 `.ignore` at the repo root hides the inert directories from `rg`/Grep by default. Use an
 explicit path (or `rg --no-ignore`) when you actually need to read LLVM optimizer/backend code.
 
+## Link-speed work: harness and workflow
+
+- Corpora: `python tests/perf/gen_corpus.py --out build-perf/corpus --profile small|medium|large`
+  (deterministic freestanding C++ compiled by clang to MSVC COFF with CodeView; no SDK needed).
+- Baseline: build the unpatched payload once and copy `llvm-ld-direct` to `build-perf/baseline/`.
+  Every candidate is gated against it: `python tests/perf/bench.py --candidate build/llvm-ld-direct
+  --baseline build-perf/baseline/llvm-ld-direct --corpus build-perf/corpus/large`. The gate
+  requires byte-identical EXE and PDB and self-determinism before it prints timings; `--time`
+  prints lld's `/time` phase breakdown; `--time-trace=<file>` on the linker itself gives
+  per-scope wall time (aggregate by name).
+- On Linux, `lld-link` output is host-independent, so the whole loop (build, profile with `perf`,
+  gate, measure) runs locally; Windows CI only confirms.
+- Payload files with perf patches are declared in `provenance/payload-prune.json` (`patched`).
+  After editing one, run `python tools/refresh_patched_closure.py` and then `tools/verify.py`.
+- Things already done (Sep 2026): parallel PDB symbol-merging analysis, parallel section-
+  contribution CRCs, PROCREF pre-serialization, parallel publics, batched GSI writes, deferred
+  parallel `.debug$S` flag scan, slice-by-8 CRC-32. Remaining serial hotspots on the large
+  corpus: `ObjFile::initializeSymbols` (symbol table insertion), output buffer `commit()` (write
+  of the in-memory PE/PDB buffers), `Publics layout` symbol-table iteration, MSF layout.
+
 ## Correctness constraints on any optimization
 
 - `tests/gold_link.ps1` / `tests/windows_correctness.ps1` require byte-identical output against
