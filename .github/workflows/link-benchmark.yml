@@ -130,15 +130,37 @@ jobs:
             exit 1
           fi
 
-      - name: generate corpora
+      # The corpora are deterministic given the generator, the compiler and the
+      # checkout path, and regenerating `large` costs 15-20 minutes on a hosted
+      # runner. Cache them. clang's version is in the key because the objects
+      # are its output; the path is not, because it is fixed in CI (CodeView
+      # objects embed absolute source paths, so a corpus is not portable
+      # between checkout locations).
+      - name: corpus cache key
+        id: corpus_key
         run: |
           set -euo pipefail
-          if [ "${{ inputs.mode || 'full' }}" = "smoke" ]; then
+          MODE="${{ inputs.mode || 'full' }}"
+          if [ "$MODE" = "smoke" ]; then
             PROFILES="small"
           else
             PROFILES="small medium large"
           fi
           echo "PROFILES=$PROFILES" >> "$GITHUB_ENV"
+          GEN_HASH=$(sha256sum tests/perf/gen_corpus.py | cut -c1-16)
+          CLANG_ID=$(clang --version | head -1 | tr -cd '[:alnum:].' )
+          echo "key=corpus-$MODE-$GEN_HASH-$CLANG_ID" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: build-perf/corpus
+          key: ${{ steps.corpus_key.outputs.key }}
+
+      - name: generate corpora
+        run: |
+          set -euo pipefail
+          # gen_corpus.py skips any object that is already present and current,
+          # so a restored cache makes this a no-op and a partial cache still
+          # only rebuilds what is missing.
           for profile in $PROFILES; do
             python3 tests/perf/gen_corpus.py --out build-perf/corpus --profile "$profile" \
               --jobs "$(nproc)"
