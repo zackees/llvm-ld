@@ -22,3 +22,4 @@
 /build-perf/
 /build-*.log
 /build-tsan/
+__pycache__/

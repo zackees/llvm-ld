@@ -8,6 +8,27 @@ length-delimited UTF-8 arguments, forwards raw diagnostic bytes to callbacks, se
 and permanently rejects re-entry after LLD reports unsafe state. See `PROVENANCE.md` for locked
 inputs, licenses, allocator ownership, and the upstream update procedure.
 
+## Link speed
+
+The COFF driver's PDB emission was parallelized and its input scan rewritten; the linker produces
+byte-identical EXE and PDB output and links substantially faster. The panel below is republished
+daily from `main` by the `link-benchmark` workflow.
+
+[![Link speedup by thread count, one line per corpus; higher is better](https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speedup-threads.svg)](https://zackees.github.io/llvm-ld/#threads)
+
+[![Link speedup over published runs at the highest measured thread count](https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speedup-history.svg)](https://zackees.github.io/llvm-ld/#history)
+
+Each point is a paired A/B measured in a single run on a single machine: the current linker against
+a baseline built from the payload as it stood before the link-speed patches, linking the same
+corpora interleaved. Hosted runners are shared and noisy, so absolute wall time compared across
+runs is deliberately not published — a paired ratio is what survives that noise. Every cell is
+gated on byte-identical output: `tests/perf/bench.py` refuses to report a timing unless the
+candidate's EXE and PDB match the baseline's exactly and both are self-deterministic.
+
+Measured on Linux; the shipping target is Windows, so the relative speedup is what transfers, not
+the absolute times. The underlying data is on the [`benchmark-stats` branch](https://github.com/zackees/llvm-ld/tree/benchmark-stats)
+(`latest.json`, `history.jsonl`) and on the [dashboard](https://zackees.github.io/llvm-ld/).
+
 ## Building
 
 The supported configuration is CMake with the Ninja generator on MSVC. The Visual Studio
