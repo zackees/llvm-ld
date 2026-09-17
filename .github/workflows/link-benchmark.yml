@@ -69,10 +69,13 @@ jobs:
             PRIOR_SHA=$(git ls-remote origin "$PUBLISH_REF" | awk '{print $1}')
             echo "prior_sha=$PRIOR_SHA" >> "$GITHUB_OUTPUT"
             git fetch origin "$PUBLISH_REF" --depth=1
-            git checkout FETCH_HEAD -- history.jsonl
-            cp history.jsonl "$RUNNER_TEMP/history-input.jsonl"
-            git checkout HEAD -- . 2>/dev/null || true
-            rm -f history.jsonl
+            # `git show` rather than `git checkout -- <path>`: reading the prior
+            # history must not touch the index or the worktree, because this job
+            # goes on to check payload files in and out to build the baseline.
+            if ! git show FETCH_HEAD:history.jsonl > "$RUNNER_TEMP/history-input.jsonl"; then
+              echo "::error::$PUBLISH_REF exists but carries no history.jsonl"
+              exit 1
+            fi
           else
             echo "prior_sha=first-publication" >> "$GITHUB_OUTPUT"
             : > "$RUNNER_TEMP/history-input.jsonl"
