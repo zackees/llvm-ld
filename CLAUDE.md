@@ -54,11 +54,31 @@ explicit path (or `rg --no-ignore`) when you actually need to read LLVM optimize
   gate, measure) runs locally; Windows CI only confirms.
 - Payload files with perf patches are declared in `provenance/payload-prune.json` (`patched`).
   After editing one, run `python tools/refresh_patched_closure.py` and then `tools/verify.py`.
+- Race-check parallel changes with a ThreadSanitizer build before merging:
+  `cmake -S . -B build-tsan -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_APPEND_VC_REV=OFF
+  -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DLLVM_USE_SANITIZER=Thread
+  -DLLVM_LD_USE_MIMALLOC=OFF -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=thread
+  -DCMAKE_SHARED_LINKER_FLAGS=-fsanitize=thread`. The two linker-flag settings are required:
+  `LLVM_USE_SANITIZER` only puts `-fsanitize=thread` on compiles here, so links fail with
+  undefined `__tsan_*` without them.
+- Two measurement traps, both of which produced bogus numbers before being caught:
+  1. **Never compare links written to different output paths.** lld embeds the linker command
+     line in the PDB's `* Linker *` module and the PDB name in the EXE debug directory, so
+     differing `/out:`/`/pdb:` names alone change the bytes. `bench.py` links everything to one
+     path for this reason.
+  2. **Never benchmark while a build is running.** A concurrent 16-core build made the patched
+     linker look 10% *slower* single-threaded; on an idle machine it is 17% faster. Check
+     `uptime` load first.
 - Things already done (Sep 2026): parallel PDB symbol-merging analysis, parallel section-
-  contribution CRCs, PROCREF pre-serialization, parallel publics, batched GSI writes, deferred
-  parallel `.debug$S` flag scan, slice-by-8 CRC-32. Remaining serial hotspots on the large
-  corpus: `ObjFile::initializeSymbols` (symbol table insertion), output buffer `commit()` (write
-  of the in-memory PE/PDB buffers), `Publics layout` symbol-table iteration, MSF layout.
+  contribution CRCs, PROCREF pre-serialization, parallel publics collection + serialization,
+  batched GSI writes, deferred parallel `.debug$S` flag scan, slice-by-8 CRC-32, cwd caching in
+  `pdbMakeAbsolute`. Result: +46% wall at default threads, +17% at `/threads:1`, on 2048 objects.
+- Remaining hot spots on the large corpus (default threads): the PDB output buffer `commit()`
+  (~95 ms, msync of a 115 MB mapping — I/O bound; forcing an in-memory buffer with `F_mmap` was
+  measurably *worse*, do not retry), `Read input files` (~150 ms; on Linux
+  `createFutureForFile` uses `std::launch::deferred` so reads are serial, but on Windows it is
+  already `std::launch::async`), `Commit DBI stream` (~52 ms), `ObjFile::initializeSymbols`
+  (~80 ms, serial symbol-table insertion).
 
 ## Correctness constraints on any optimization
 
