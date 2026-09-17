@@ -1340,34 +1340,38 @@ void PDBLinker::addPublicsToPDB() {
   ScopedTimer t3(ctx.publicsLayoutTimer);
   // Compute the public symbols.
   auto &gsiBuilder = builder.getGsiBuilder();
-  // Collect the symbols that get a public record, then build the records in
-  // parallel: computing each one looks up the symbol's output section and RVA,
-  // which adds up over a large symbol table.
-  std::vector<Defined *> defs;
-  ctx.symtab.forEachSymbol([&defs, this](Symbol *s) {
+  // Walking the symbol table is a serial hash-map traversal; everything per
+  // symbol (the liveness/chunk checks, the coverage-symbol filter, and
+  // building the record, which looks up the output section and RVA) runs in
+  // parallel over a snapshot of it. The snapshot order is kept, so the records
+  // are produced in the same order as a serial walk.
+  std::vector<Symbol *> symbols;
+  ctx.symtab.forEachSymbol([&symbols](Symbol *s) { symbols.push_back(s); });
+  std::vector<Defined *> defs(symbols.size());
+  parallelFor(0, symbols.size(), [&](size_t i) {
     // Only emit external, defined, live symbols that have a chunk. Static,
     // non-external symbols do not appear in the symbol table.
-    auto *def = dyn_cast<Defined>(s);
-    if (def && def->isLive() && def->getChunk()) {
-      // Don't emit a public symbol for coverage data symbols. LLVM code
-      // coverage (and PGO) create a __profd_ and __profc_ symbol for every
-      // function. C++ mangled names are long, and tend to dominate symbol size.
-      // Including these names triples the size of the public stream, which
-      // results in bloated PDB files. These symbols generally are not helpful
-      // for debugging, so suppress them.
-      StringRef name = def->getName();
-      if (name.data()[0] == '_' && name.data()[1] == '_') {
-        // Drop the '_' prefix for x86.
-        if (ctx.config.machine == I386)
-          name = name.drop_front(1);
-        if (name.starts_with("__profd_") || name.starts_with("__profc_") ||
-            name.starts_with("__covrec_")) {
-          return;
-        }
-      }
-      defs.push_back(def);
+    auto *def = dyn_cast<Defined>(symbols[i]);
+    if (!def || !def->isLive() || !def->getChunk())
+      return;
+    // Don't emit a public symbol for coverage data symbols. LLVM code
+    // coverage (and PGO) create a __profd_ and __profc_ symbol for every
+    // function. C++ mangled names are long, and tend to dominate symbol size.
+    // Including these names triples the size of the public stream, which
+    // results in bloated PDB files. These symbols generally are not helpful
+    // for debugging, so suppress them.
+    StringRef name = def->getName();
+    if (name.data()[0] == '_' && name.data()[1] == '_') {
+      // Drop the '_' prefix for x86.
+      if (ctx.config.machine == I386)
+        name = name.drop_front(1);
+      if (name.starts_with("__profd_") || name.starts_with("__profc_") ||
+          name.starts_with("__covrec_"))
+        return;
     }
+    defs[i] = def;
   });
+  llvm::erase(defs, nullptr);
   std::vector<pdb::BulkPublic> publics(defs.size());
   parallelFor(0, defs.size(),
               [&](size_t i) { publics[i] = createPublic(ctx, defs[i]); });
