@@ -175,3 +175,35 @@ and test executables onto a windows-2025 runner and runs them natively via
 mimalloc static-CRT (`/MT`) malloc override survived cross-compilation, since ctest's own
 `CTestTestfile.cmake` embeds Linux build-tree absolute paths and cannot be transplanted to the
 Windows runner as-is.
+
+## Pinned clang-cl for the Tier 2 LTO byte-identity rows (issue #6)
+
+MSVC `cl.exe` cannot emit LLVM bitcode, so the ThinLTO/full-LTO rows in
+`tests/windows_correctness.ps1` need a real clang-cl. Left unpinned, that compiler floats with
+the `windows-2025` runner image: a newer clang-cl could emit a bitcode version the pinned LLVM
+`23.1.0` LTO pipeline this repository builds accepts differently, silently invalidating a
+byte-identity gate.
+
+Pinned to the official `llvmorg-23.1.0` release asset
+`clang+llvm-23.1.0-x86_64-pc-windows-msvc.tar.zst` (the `.zst` variant of the same release the
+LLVM source payload above is pinned to -- smaller than the `.tar.xz` variant, same contents),
+SHA-256 `1aebf024b959b3835c3bd936da2fa58cd002c61ccf47fce1714447b900bd9837`, checked in CI
+(`correctness.yml`'s `deterministic-coff` job) before extraction. Only `clang.exe`/`clang-cl.exe`,
+their DLL dependencies (`libclang.dll`, `libiomp5md.dll`, `libomp.dll`, `LLVM-C.dll`, `LTO.dll`,
+`Remarks.dll`), and the compiler resource directory (`lib/clang/23/include`, needed for builtin
+headers like `intrin.h`) are extracted -- about 490MB, not the release's full ~4GB tree of every
+LLVM tool this repository has no use for.
+
+The release also publishes a Sigstore bundle (`.jsonl`) and a detached signature (`.sig`) per
+asset. Both are committed alongside this file's directory
+(`provenance/clang-llvm-23.1.0-x86_64-pc-windows-msvc.tar.zst.{sig,jsonl}`) for reference and
+future verification tooling, but CI does not verify them today -- only the SHA-256 above is
+checked programmatically. Full Sigstore verification needs `cosign`/`slsa-verifier` and an
+online call to Sigstore's transparency log; that is a real gap relative to the rigor this
+document holds other pins to, tracked as follow-up work on issue #6 rather than silently assumed
+solved.
+
+To update: download the new release's `clang+llvm-<ver>-x86_64-pc-windows-msvc.tar.zst`, its
+`.sig`/`.jsonl`, recompute the archive's SHA-256, replace both files under `provenance/`, and
+update `LLVM_LD_CLANGCL_VERSION`/`LLVM_LD_CLANGCL_ARCHIVE_SHA256` in `correctness.yml` in the same
+reviewed change. Confirm `deterministic-coff` stays green.

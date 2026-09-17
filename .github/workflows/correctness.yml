@@ -15,6 +15,13 @@ jobs:
     runs-on: windows-2025
     env:
       SCCACHE_GHA_ENABLED: "true"
+      # Pinned clang-cl for the LTO rows in windows_correctness.ps1 (issue #6): MSVC cl.exe cannot
+      # emit LLVM bitcode, so those rows need a real clang-cl, and the runner's preinstalled one
+      # floats with the image -- a newer clang-cl could emit a bitcode version the pinned LLVM
+      # 23.1 LTO pipeline accepts differently, a silent correctness hazard for a byte-identity
+      # gate. See PROVENANCE.md for the exact pin and update procedure.
+      LLVM_LD_CLANGCL_VERSION: "23.1.0"
+      LLVM_LD_CLANGCL_ARCHIVE_SHA256: "1aebf024b959b3835c3bd936da2fa58cd002c61ccf47fce1714447b900bd9837"
     steps:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1
@@ -34,6 +41,65 @@ jobs:
         shell: pwsh
         run: sccache --show-stats
         continue-on-error: true
+      - name: Resolve pinned clang-cl location
+        shell: pwsh
+        run: echo "LLVM_LD_CLANGCL_ROOT=$env:RUNNER_TEMP\pinned-clangcl" >> $env:GITHUB_ENV
+      - name: Cache pinned clang-cl
+        id: clangcl-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.LLVM_LD_CLANGCL_ROOT }}
+          key: clangcl-${{ env.LLVM_LD_CLANGCL_VERSION }}-${{ env.LLVM_LD_CLANGCL_ARCHIVE_SHA256 }}
+      # Only clang.exe/clang-cl.exe, their DLL dependencies, and the compiler resource dir
+      # (lib/clang/<ver>/include, needed for builtin headers like intrin.h) are extracted from the
+      # official release archive -- ~490MB, not the full ~4GB tree of every LLVM tool this repo
+      # does not use. Exact member paths, not globs: portable across GNU tar and bsdtar (Windows'
+      # bundled tar.exe) alike, and a directory argument recurses automatically under both.
+      - name: Provision pinned clang-cl
+        if: steps.clangcl-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $archive = Join-Path $env:RUNNER_TEMP 'clang-llvm.tar.zst'
+          $prefix = "clang+llvm-$($env:LLVM_LD_CLANGCL_VERSION)-x86_64-pc-windows-msvc"
+          $url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-$($env:LLVM_LD_CLANGCL_VERSION)/clang%2Bllvm-$($env:LLVM_LD_CLANGCL_VERSION)-x86_64-pc-windows-msvc.tar.zst"
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          $actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $env:LLVM_LD_CLANGCL_ARCHIVE_SHA256) {
+            throw "pinned clang-cl archive checksum mismatch: got $actual, expected $($env:LLVM_LD_CLANGCL_ARCHIVE_SHA256)"
+          }
+          New-Item -ItemType Directory -Force -Path $env:LLVM_LD_CLANGCL_ROOT | Out-Null
+          tar -xf $archive -C $env:LLVM_LD_CLANGCL_ROOT `
+            "$prefix/bin/clang.exe" `
+            "$prefix/bin/clang-cl.exe" `
+            "$prefix/bin/libclang.dll" `
+            "$prefix/bin/libiomp5md.dll" `
+            "$prefix/bin/libomp.dll" `
+            "$prefix/bin/LLVM-C.dll" `
+            "$prefix/bin/LTO.dll" `
+            "$prefix/bin/Remarks.dll" `
+            "$prefix/lib/clang"
+          Remove-Item $archive
+      - name: Put pinned clang-cl on PATH
+        shell: pwsh
+        run: |
+          $prefix = "clang+llvm-$($env:LLVM_LD_CLANGCL_VERSION)-x86_64-pc-windows-msvc"
+          echo "$env:LLVM_LD_CLANGCL_ROOT\$prefix\bin" >> $env:GITHUB_PATH
+      - name: Verify pinned clang-cl version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          # clang-cl --version returns multi-line output as a PowerShell array; -notmatch against
+          # an array does an element-wise match and returns the *non*-matching lines, so testing
+          # a multi-line $out directly is truthy (throws) even when one line does match. Join
+          # first so the check is a single string match.
+          $out = (clang-cl --version) -join "`n"
+          Write-Host $out
+          if ($out -notmatch [regex]::Escape($env:LLVM_LD_CLANGCL_VERSION)) {
+            throw "pinned clang-cl did not report version $($env:LLVM_LD_CLANGCL_VERSION)"
+          }
       - name: Deterministic EXE/PDB, MSVC/MinGW, LTO, and native execution
         shell: pwsh
         run: |
