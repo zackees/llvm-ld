@@ -118,12 +118,45 @@ its SHA-256, and the `--sdk-version`/`--crt-version` passed to `xwin splat`. The
 CI job environment variables in `.github/workflows/ci.yml` (`build-linux-cross`); any change to one
 of them is a toolchain bump and must be reviewed the same way an LLVM tag bump is.
 
+The currently pinned values, all in `build-linux-cross`'s job `env`:
+
+- **clang/lld** (`clang-cl`/`lld-link`/`llvm-lib`/`llvm-rc`/`llvm-nm`): apt.llvm.org
+  `llvm-toolchain-noble-22` at the exact snapshot version
+  `1:22.1.8~++20260714014902+ca7933e47d3a-1~exp1~20260714135019.80`
+  (`LLVM_LD_CLANG_APT_VERSION`), installed via `apt-get install clang-tools-22=<that version>
+  llvm-22=<that version>` so a removed snapshot build fails the install outright rather than
+  silently resolving to a different build. The apt.llvm.org signing key is fetched and
+  checked against SHA-256 `8b2a587ffd672c4687e7581dad4b2f6c1bb2ad6b480cd9771ba2ff48e0b8c75d`
+  before being trusted -- the same key/recipe `zackees/reld`'s `ci.yml` validates
+  (`CLANG_PACKAGE_VERSION`), reused here rather than re-deriving a fresh, unproven pin. Must
+  stay >= clang 19: the pinned MSVC CRT's `yvals_core.h` hard-errors below that
+  (`STL1000: Unexpected compiler version, expected Clang 19.0.0 or newer`).
+- **xwin**: `0.6.5`, installed via `cargo install xwin --version 0.6.5 --locked`.
+- **Visual Studio channel manifest**: a snapshot of `https://aka.ms/vs/17/release/channel`
+  fetched 2026-09-17, committed at `provenance/vs-channel-manifest.json`, SHA-256
+  `fca418ba94ffbcfb7a2b25f10f16f39dd09660568d21eef4bd3f274cb0b27b8c` (checked in CI before
+  `xwin --manifest provenance/vs-channel-manifest.json splat` runs). At fetch time this
+  resolved to Visual Studio `17.14.41` (September 2026), build `17.14.37710.0`. Pinning the
+  top-level manifest pins the whole resolution tree: the per-product sub-manifests (Build
+  Tools, SDK, CRT payload catalogs) it references are fixed, versioned URLs embedded in this
+  file, not further "latest" indirections.
+- **SDK / CRT**: `10.0.26100` / `14.44.17.14`, matching what the native `build-windows` job
+  compiles against (see the header-drift note above), resolved against the pinned manifest.
+
+To update any of these: change the value in `.github/workflows/ci.yml`, and for the VS
+manifest, re-fetch `https://aka.ms/vs/17/release/channel`, recompute its SHA-256, overwrite
+`provenance/vs-channel-manifest.json`, and update both the SHA-256 and the recorded VS
+version/build/fetch-date above in the same reviewed change. Confirm `build-linux-cross` and
+`test-windows-cross` stay green, with `allocator-probe mimalloc` still reporting
+`crt_redirected: 1`, before merging the bump.
+
 The xwin splat itself -- the extracted MSVC CRT headers/libs and Windows SDK headers/libs -- is
 never committed to this repository and never published as a CI artifact. Those files are
 Microsoft-licensed and not redistributable; only their use to compile Windows binaries on a
 non-Windows build machine is permitted, under the Visual Studio Build Tools EULA's OSS/CI carve-out
 that `cmake/WinMsvcCross.cmake` documents. CI re-provisions or cache-restores the splat per run; a
-splat cache entry is keyed on the pinned xwin/SDK/CRT versions above, never committed to git.
+splat cache entry is keyed on the pinned xwin/manifest/SDK/CRT versions above, never committed to
+git.
 
 Determinism claims for the cross build are narrower than the native ones above. A Linux-built
 clang-cl/lld-link `llvm_ld.dll` is never expected to be byte-identical to a Windows-built
