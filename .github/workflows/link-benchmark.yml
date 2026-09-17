@@ -27,12 +27,23 @@ on:
         required: false
   schedule:
     - cron: "41 7 * * *"
+  # A daily-only workflow hides its own breakage until the next cron. Run a
+  # smoke measurement on PRs that touch the benchmark machinery, so a change to
+  # it is exercised before merge. Publication is gated on main + full mode, so
+  # a PR run never publishes.
+  pull_request:
+    paths:
+      - ".github/workflows/link-benchmark.yml"
+      - "tools/bench_report.py"
+      - "tests/perf/**"
 
-# Never cancel a publishing run: a half-finished push to the data branch is
-# worse than a queued run.
+# Never cancel or coalesce a publishing run: a half-finished push to the data
+# branch is worse than a queued run. PR smoke runs get their own per-ref group
+# so they neither queue behind production nor block it, and a new push to a PR
+# supersedes its own in-flight run. This mirrors ci.yml and correctness.yml.
 concurrency:
-  group: link-benchmark-production
-  cancel-in-progress: false
+  group: link-benchmark-${{ github.ref == 'refs/heads/main' && 'production' || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -143,7 +154,10 @@ jobs:
         id: corpus_key
         run: |
           set -euo pipefail
-          MODE="${{ inputs.mode || 'full' }}"
+          # workflow_dispatch honours the input; a PR is always smoke (a PR must
+          # not spend 20 minutes building the large corpus); cron is always full.
+          MODE="${{ inputs.mode || (github.event_name == 'pull_request' && 'smoke' || 'full') }}"
+          echo "MODE=$MODE" >> "$GITHUB_ENV"
           if [ "$MODE" = "smoke" ]; then
             PROFILES="small"
           else
@@ -217,7 +231,7 @@ jobs:
           ELIGIBLE=false
           if [ "${{ github.repository }}" = "zackees/llvm-ld" ] && \
              [ "${{ github.ref }}" = "refs/heads/main" ] && \
-             [ "${{ inputs.mode || 'full' }}" = "full" ]; then
+             [ "$MODE" = "full" ]; then
             ELIGIBLE=true
           fi
           echo "publish_eligible=$ELIGIBLE" >> "$GITHUB_OUTPUT"
