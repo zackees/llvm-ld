@@ -47,7 +47,10 @@ explicit path (or `rg --no-ignore`) when you actually need to read LLVM optimize
 - Baseline: build the unpatched payload once and copy `llvm-ld-direct` to `build-perf/baseline/`.
   Every candidate is gated against it: `python tests/perf/bench.py --candidate build/llvm-ld-direct
   --baseline build-perf/baseline/llvm-ld-direct --corpus build-perf/corpus/large`. The gate
-  requires byte-identical EXE and PDB and self-determinism before it prints timings; `--time`
+  requires byte-identical EXE and PDB and self-determinism before it prints timings. It also
+  prints CPU and peak-RSS deltas and warns when peak RSS regresses more than `--max-rss-regress`
+  (default 5%), because a change that buys wall time with memory is a trade to make on purpose in
+  a library that runs inside someone else's process. `--time`
   prints lld's `/time` phase breakdown; `--time-trace=<file>` on the linker itself gives
   per-scope wall time (aggregate by name).
 - On Linux, `lld-link` output is host-independent, so the whole loop (build, profile with `perf`,
@@ -80,12 +83,35 @@ explicit path (or `rg --no-ignore`) when you actually need to read LLVM optimize
   contribution CRCs, PROCREF pre-serialization, parallel publics collection + serialization,
   batched GSI writes, deferred parallel `.debug$S` flag scan, slice-by-8 CRC-32, cwd caching in
   `pdbMakeAbsolute`. Result: +46% wall at default threads, +17% at `/threads:1`, on 2048 objects.
-- Remaining hot spots on the large corpus (default threads): the PDB output buffer `commit()`
-  (~95 ms, msync of a 115 MB mapping — I/O bound; forcing an in-memory buffer with `F_mmap` was
-  measurably *worse*, do not retry), `Read input files` (~150 ms; on Linux
-  `createFutureForFile` uses `std::launch::deferred` so reads are serial, but on Windows it is
-  already `std::launch::async`), `Commit DBI stream` (~52 ms), `ObjFile::initializeSymbols`
-  (~80 ms, serial symbol-table insertion).
+- Remaining hot spots on the large corpus (default threads), all investigated under #15 and
+  judged not worth a payload patch: the PDB output buffer `commit()` (~100 ms, kernel writeback
+  when a 115 MB dirty mapping is unmapped — I/O bound), `Read input files` (~130 ms, but on Linux
+  only: `createFutureForFile` uses `std::launch::deferred` there and `std::launch::async` under
+  `_WIN64`, and Windows is the shipping target), `Commit DBI stream` (~66 ms), `Publics layout`
+  and `MSF layout` (~25 ms each, already parallel), `ObjFile::initializeSymbols` (~80 ms, serial
+  symbol-table insertion; parallelizing needs a concurrent map and would change resolution
+  order). What is left is I/O-bound or in the 5-20 ms range on a ~570 ms link, i.e. 1-3% each,
+  which does not pay for another permanent delta against the vendored payload.
+
+### Do not retry (measured, rejected)
+
+- **Forcing in-memory output buffers** (`FileOutputBuffer::F_mmap` for the PE and PDB):
+  measurably *worse*. The commit cost is kernel writeback, not the buffer strategy.
+- **Coalescing contiguous block writes in `WritableMappedBlockStream::writeBytes`**: read as +3%
+  against the original baseline, but the phase it targeted moved 64.2 -> 62.0 ms (noise) and a
+  direct A/B showed **-2.5%**. The underlying write is already a cheap memcpy, so scanning for
+  runs costs more than the calls it saves.
+- **Single-pass symbol merging** (#15 item 1: cache the relocated/remapped module records in the
+  parallel analysis pass so committing the DBI stream is a memcpy, instead of relocating every
+  record a second time). Implemented and byte-identical on all three corpora, but rejected:
+  CPU time moved 2354 -> 2339 ms (**-0.7%**), wall was within noise, and peak RSS rose
+  **568 -> 641 MB (+13%)** on the large corpus. Both passes were already parallel across objects,
+  so moving work between them is wall-neutral, and the only work actually eliminated is the
+  double relocation of records that live in *both* the module and globals streams (essentially
+  just procedures), which is small. Holding every object's module records from symbol merging
+  until the DBI stream is committed is a bad trade for a library loaded into someone else's
+  process. If revisited, the memory must be bounded first, and the win re-measured before the
+  memory cost is accepted.
 
 ## Correctness constraints on any optimization
 
