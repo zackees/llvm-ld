@@ -164,6 +164,10 @@ private:
       pendingFirstSectionContribs;
 
   llvm::SmallString<128> nativePath;
+
+  /// Cached current working directory for pdbMakeAbsolute; empty until the
+  /// first use, and left empty if it cannot be determined.
+  llvm::SmallString<128> currentDir;
 };
 
 /// Represents an unrelocated DEBUG_S_FRAMEDATA subsection.
@@ -301,7 +305,14 @@ void PDBLinker::pdbMakeAbsolute(SmallVectorImpl<char> &fileName) {
   // nonsensical path.
   if (ctx.config.pdbSourcePath.empty()) {
     sys::path::native(fileName);
-    sys::fs::make_absolute(fileName);
+    // make_absolute(path) queries the current directory every call; it is
+    // called once per object and per source file, so query it once instead.
+    if (currentDir.empty() && sys::fs::current_path(currentDir))
+      currentDir.clear();
+    if (currentDir.empty())
+      sys::fs::make_absolute(fileName);
+    else
+      sys::path::make_absolute(currentDir, fileName);
     sys::path::remove_dots(fileName, true);
     return;
   }

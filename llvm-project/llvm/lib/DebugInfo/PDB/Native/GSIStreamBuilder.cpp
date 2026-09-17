@@ -382,32 +382,26 @@ void GSIStreamBuilder::addGlobalSymbol(const codeview::CVSymbol &Symbol) {
   Globals.push_back(Symbol);
 }
 
-// Every write to the underlying MSF stream is split along block boundaries
-// and goes through the block map, so writing hundreds of thousands of small
-// records one at a time is dominated by that overhead. Both writers below
-// gather records into a buffer of this size and write it in one go instead.
-static constexpr size_t RecordWriteBatchBytes = 1 << 20;
-
-// Serialize each public and write it.
+// Serialize each public and write it. Publics already carry their record
+// offsets (assigned in addPublicSymbols), so all of them are serialized into
+// one buffer in parallel and written with a single call.
 static Error writePublics(BinaryStreamWriter &Writer,
                           ArrayRef<BulkPublic> Publics) {
-  std::vector<uint8_t> Batch;
-  Batch.reserve(RecordWriteBatchBytes);
-  for (const BulkPublic &Pub : Publics) {
-    size_t Size = sizeOfPublic(Pub);
-    if (Batch.size() + Size > RecordWriteBatchBytes && !Batch.empty()) {
-      if (Error E = Writer.writeBytes(Batch))
-        return E;
-      Batch.clear();
-    }
-    size_t Offset = Batch.size();
-    Batch.resize(Offset + Size);
-    serializePublic(Batch.data() + Offset, Pub);
-  }
-  if (!Batch.empty())
-    return Writer.writeBytes(Batch);
-  return Error::success();
+  if (Publics.empty())
+    return Error::success();
+  const BulkPublic &Last = Publics.back();
+  std::vector<uint8_t> Buffer(size_t(Last.SymOffset) + sizeOfPublic(Last));
+  parallelFor(0, Publics.size(), [&](size_t I) {
+    serializePublic(Buffer.data() + Publics[I].SymOffset, Publics[I]);
+  });
+  return Writer.writeBytes(Buffer);
 }
+
+// Every write to the underlying MSF stream is split along block boundaries
+// and goes through the block map, so writing hundreds of thousands of small
+// records one at a time is dominated by that overhead. Gather records into a
+// buffer of this size and write it in one go instead.
+static constexpr size_t RecordWriteBatchBytes = 1 << 20;
 
 static Error writeRecords(BinaryStreamWriter &Writer,
                           ArrayRef<CVSymbol> Records) {
