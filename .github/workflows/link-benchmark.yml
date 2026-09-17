@@ -130,7 +130,18 @@ jobs:
           # lacks BASELINE_REF would silently make this unmeasurable.
           fetch-depth: 0
           persist-credentials: false
-      - uses: mozilla-actions/sccache-action@v0.0.11
+      # zccache rather than sccache here. This job's cost is dominated by cache
+      # lookups across ~1900 pinned LLVM translation units that almost never
+      # change, and zccache answers a warm hit in about 1ms against sccache's
+      # ~170ms, which is minutes of pure overhead at this unit count. It is a
+      # drop-in CMAKE_*_COMPILER_LAUNCHER and persists to the same GitHub
+      # Actions cache. The Cargo-flavoured caches are off: this repo has no Rust.
+      - uses: zackees/zccache@v1.4.0
+        with:
+          shared-key: link-benchmark-${{ runner.os }}
+          cache-compilation: "true"
+          cache-cargo-registry: "false"
+          cache-target: "false"
 
       - name: resolve prior publication
         id: history
@@ -174,7 +185,7 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DLLVM_APPEND_VC_REV=OFF \
             -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+            -DCMAKE_C_COMPILER_LAUNCHER=zccache -DCMAKE_CXX_COMPILER_LAUNCHER=zccache
           cmake --build build --target llvm-ld-direct
           mkdir -p "$RUNNER_TEMP/bin"
           cp build/llvm-ld-direct "$RUNNER_TEMP/bin/candidate"
@@ -195,8 +206,9 @@ jobs:
           git checkout "$BASELINE_REF" -- $FILES
           cmake --build build --target llvm-ld-direct
           cp build/llvm-ld-direct "$RUNNER_TEMP/bin/baseline"
+          # Restore the sources but do not rebuild: both binaries are already
+          # saved aside, and nothing downstream reads the build tree.
           git checkout HEAD -- $FILES
-          cmake --build build --target llvm-ld-direct
           # The guard in bench.py would catch this too, but failing here points
           # at the real cause instead of at the measurement.
           if cmp -s "$RUNNER_TEMP/bin/candidate" "$RUNNER_TEMP/bin/baseline"; then
@@ -229,6 +241,11 @@ jobs:
         with:
           path: build-perf/corpus
           key: ${{ steps.corpus_key.outputs.key }}
+
+      - name: zccache status
+        if: always()
+        continue-on-error: true
+        run: zccache status
 
       - name: generate corpora
         run: |
@@ -311,6 +328,11 @@ jobs:
             ${{ runner.temp }}/manifest.sha256
           if-no-files-found: ignore
           retention-days: 30
+
+      # Required by zccache: flushes the compilation cache to the Actions cache.
+      # Without it the next run starts cold again.
+      - if: always()
+        uses: zackees/zccache/action/cleanup@v1.4.0
 
   # Re-validate the uploaded artifact in a clean job, so the artifact and the
   # push are checked independently of the job that produced them.
