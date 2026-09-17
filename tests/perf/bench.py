@@ -42,6 +42,8 @@ def main() -> int:
     ap.add_argument("--time", action="store_true", help="print lld /time output for the candidate and exit")
     ap.add_argument("--json", type=pathlib.Path)
     ap.add_argument("--no-gate", action="store_true")
+    ap.add_argument("--max-rss-regress", type=float, default=5.0,
+                    help="flag a peak-RSS increase above this percent (default 5)")
     a = ap.parse_args()
     corpus = a.corpus.resolve(); rsp = corpus / "link.rsp"
     extra = list(a.extra) + ([f"/threads:{a.threads}"] if a.threads else [])
@@ -92,8 +94,17 @@ def main() -> int:
             ratios = [c["wall"] / b["wall"] for c, b in zip(samples["candidate"], samples["baseline"])]
             result["paired_wall_ratio_median"] = statistics.median(ratios)
             result["speedup_percent"] = 100 * (1 - result["paired_wall_ratio_median"])
+            # Peak RSS is reported as a delta, not just two numbers: a change that buys wall
+            # time by holding more memory is a trade to make deliberately, and this linker runs
+            # as a library inside someone else's process.
+            result["rss_delta_percent"] = 100 * (result["candidate"]["rss_mb"] / result["baseline"]["rss_mb"] - 1)
+            result["cpu_delta_percent"] = 100 * (result["candidate"]["cpu_ms"] / result["baseline"]["cpu_ms"] - 1)
             line += (f"\nbaseline:  wall {result['baseline']['wall_ms']:.1f} ms  cpu {result['baseline']['cpu_ms']:.1f} ms  rss {result['baseline']['rss_mb']:.0f} MB"
-                     f"\nspeedup: {result['speedup_percent']:+.1f}% wall (paired median ratio {result['paired_wall_ratio_median']:.3f}, n={a.runs})")
+                     f"\nspeedup: {result['speedup_percent']:+.1f}% wall (paired median ratio {result['paired_wall_ratio_median']:.3f}, n={a.runs})"
+                     f"\ncpu: {result['cpu_delta_percent']:+.1f}%   peak rss: {result['rss_delta_percent']:+.1f}%")
+            if result["rss_delta_percent"] > a.max_rss_regress:
+                line += (f"\nWARNING: peak RSS regressed {result['rss_delta_percent']:+.1f}% "
+                         f"(> {a.max_rss_regress:.0f}%); justify the memory cost against the wall-time win")
         print(line)
         if a.json: a.json.write_text(json.dumps(result, indent=2) + "\n")
         return 0
