@@ -91,7 +91,11 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
-          $out = clang-cl --version
+          # clang-cl --version returns multi-line output as a PowerShell array; -notmatch against
+          # an array does an element-wise match and returns the *non*-matching lines, so testing
+          # a multi-line $out directly is truthy (throws) even when one line does match. Join
+          # first so the check is a single string match.
+          $out = (clang-cl --version) -join "`n"
           Write-Host $out
           if ($out -notmatch [regex]::Escape($env:LLVM_LD_CLANGCL_VERSION)) {
             throw "pinned clang-cl did not report version $($env:LLVM_LD_CLANGCL_VERSION)"
