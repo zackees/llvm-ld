@@ -163,6 +163,21 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "${_llvm_ld_link_flags_joined}")
 set(CMAKE_SHARED_LINKER_FLAGS_INIT "${_llvm_ld_link_flags_joined}")
 set(CMAKE_MODULE_LINKER_FLAGS_INIT "${_llvm_ld_link_flags_joined}")
 
+# `/manifest:no` above only tells lld-link not to embed a manifest resource itself. Separately,
+# and regardless of that flag, CMake's own `cmake -E vs_link_exe` wrapper decides whether to
+# invoke an external "manifest tool" (`--mt=<CMAKE_MT>`) based on the *compiler's reported*
+# MSVC-compatible version -- a decision `find_program(CMAKE_MT ...)` makes by searching PATH for
+# a program literally named `mt`. On a Linux build host that is an accident waiting to happen:
+# Ubuntu ships an unrelated `/usr/bin/mt` (the GNU "magnetic tape" tool, from `cpio`), and once a
+# clang-cl version reports a high enough simulated MSVC version to cross that threshold, CMake
+# resolves CMAKE_MT to that unrelated binary and the try-compile fails with a bewildering
+# "no such file or directory" when it mis-executes. This is not hypothetical: it is exactly what
+# broke this toolchain file's try-compiles when the pinned cross clang/lld version moved to
+# 22.1.8 (see PROVENANCE.md). LLVM's own reference cross toolchain
+# (llvm/cmake/platforms/WinMsvc.cmake) has this identical latent gap; force it off explicitly
+# rather than trust `/manifest:no` alone.
+set(CMAKE_MT "CMAKE_MT-NOTFOUND" CACHE STRING "No external manifest tool: /manifest:no makes it unnecessary" FORCE)
+
 # Static CRT selection. This *must* live in the toolchain file, not only in the root
 # CMakeLists.txt, because the root CMakeLists.txt does not execute inside CMake's own
 # compiler-check and ABI-detection test projects (CMakeTestCCompiler.cmake /
