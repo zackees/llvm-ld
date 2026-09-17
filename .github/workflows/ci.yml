@@ -116,10 +116,17 @@ jobs:
           echo "deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/noble/ ${LLVM_LD_CLANG_APT_SUITE} main" \
             | sudo tee "/etc/apt/sources.list.d/llvm-${LLVM_LD_CLANG_APT_PACKAGE_SERIES}.list"
           sudo apt-get update
-          # Exact version pin: clang-cl/llvm-lib/llvm-rc ship in clang-tools-N, llvm-nm in llvm-N.
+          # Exact version pin. Package layout on apt.llvm.org (verified against each .deb's file
+          # list, not assumed): clang-cl-N ships in the base clang-N package (pulled in
+          # transitively as clang-tools-N's dependency, which is why clang-cl worked even before
+          # this fix); llvm-lib-N/llvm-rc-N/llvm-nm-N ship in llvm-N; lld-link-N ships in the
+          # separate lld-N package, which nothing else here depends on -- omitting it left
+          # /usr/local/bin/lld-link a dangling symlink and every cross try-compile failed at the
+          # link step with a bewildering "no such file or directory".
           sudo apt-get install -y \
             "clang-tools-${LLVM_LD_CLANG_APT_PACKAGE_SERIES}=${LLVM_LD_CLANG_APT_VERSION}" \
-            "llvm-${LLVM_LD_CLANG_APT_PACKAGE_SERIES}=${LLVM_LD_CLANG_APT_VERSION}"
+            "llvm-${LLVM_LD_CLANG_APT_PACKAGE_SERIES}=${LLVM_LD_CLANG_APT_VERSION}" \
+            "lld-${LLVM_LD_CLANG_APT_PACKAGE_SERIES}=${LLVM_LD_CLANG_APT_VERSION}"
           sudo ln -sf "/usr/bin/clang-cl-${LLVM_LD_CLANG_APT_PACKAGE_SERIES}" /usr/local/bin/clang-cl
           sudo ln -sf "/usr/bin/lld-link-${LLVM_LD_CLANG_APT_PACKAGE_SERIES}" /usr/local/bin/lld-link
           sudo ln -sf "/usr/bin/llvm-lib-${LLVM_LD_CLANG_APT_PACKAGE_SERIES}" /usr/local/bin/llvm-lib
