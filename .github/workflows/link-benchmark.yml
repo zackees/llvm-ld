@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "full (all corpora) or smoke (small corpus only, no publish)"
+        description: "full (all corpora, publishes) or smoke (small corpus only, never publishes)"
         type: choice
         options: [full, smoke]
         default: full
@@ -25,25 +25,42 @@ on:
         type: number
         default: 9
         required: false
+      force:
+        description: "Measure even if main has not moved since the last publication"
+        type: boolean
+        default: false
+        required: false
+  # Callable from another workflow, e.g. a release pipeline that wants the
+  # panels refreshed at a specific point rather than waiting for the cron.
+  workflow_call:
+    inputs:
+      mode:
+        description: "full or smoke"
+        type: string
+        default: full
+        required: false
+      runs:
+        description: "Paired samples per cell"
+        type: number
+        default: 9
+        required: false
+      force:
+        description: "Measure even if main has not moved since the last publication"
+        type: boolean
+        default: false
+        required: false
+  # At most once a day. The precheck job below turns a run into a no-op when
+  # main has not moved since the last publication, so an idle repository costs
+  # about a minute rather than a full measurement.
   schedule:
     - cron: "41 7 * * *"
-  # A daily-only workflow hides its own breakage until the next cron. Run a
-  # smoke measurement on PRs that touch the benchmark machinery, so a change to
-  # it is exercised before merge. Publication is gated on main + full mode, so
-  # a PR run never publishes.
-  pull_request:
-    paths:
-      - ".github/workflows/link-benchmark.yml"
-      - "tools/bench_report.py"
-      - "tests/perf/**"
 
 # Never cancel or coalesce a publishing run: a half-finished push to the data
-# branch is worse than a queued run. PR smoke runs get their own per-ref group
-# so they neither queue behind production nor block it, and a new push to a PR
-# supersedes its own in-flight run. This mirrors ci.yml and correctness.yml.
+# branch is worse than a queued run, and runs are rare enough that queuing is
+# not a concern.
 concurrency:
-  group: link-benchmark-${{ github.ref == 'refs/heads/main' && 'production' || github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: link-benchmark-production
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -55,9 +72,52 @@ env:
   BASELINE_REF: f9cdd65cbfb5f64654ce428524a8126652bed8a7
 
 jobs:
+  # Cheap guard so the daily cron does nothing when there is nothing new to
+  # measure. Republishing an identical measurement would only add runner noise
+  # to the history series.
+  precheck:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      should_run: ${{ steps.decide.outputs.should_run }}
+      prior_source_sha: ${{ steps.decide.outputs.prior_source_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: decide whether there is anything to measure
+        id: decide
+        run: |
+          set -euo pipefail
+          SHOULD_RUN=true
+          PRIOR_SOURCE=""
+          if git ls-remote --exit-code origin "$PUBLISH_REF" >/dev/null 2>&1; then
+            git fetch origin "$PUBLISH_REF" --depth=1
+            # Deliberately lenient: if the prior publication cannot be read,
+            # measure. Failing here would let one malformed branch block every
+            # future daily run, and an extra measurement is the cheaper error.
+            PRIOR_SOURCE=$(git show FETCH_HEAD:latest.json 2>/dev/null \
+              | python3 -c "import json,sys; print(json.load(sys.stdin)['run']['source_sha'])" \
+              2>/dev/null || true)
+            if [ -n "$PRIOR_SOURCE" ] && [ "$PRIOR_SOURCE" = "${{ github.sha }}" ] \
+               && [ "${{ inputs.force || false }}" != "true" ]; then
+              SHOULD_RUN=false
+            fi
+          fi
+          echo "should_run=$SHOULD_RUN" >> "$GITHUB_OUTPUT"
+          echo "prior_source_sha=$PRIOR_SOURCE" >> "$GITHUB_OUTPUT"
+          if [ "$SHOULD_RUN" = "false" ]; then
+            echo "main has not moved since the last publication ($PRIOR_SOURCE); skipping." \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   measure:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    needs: precheck
+    if: needs.precheck.outputs.should_run == 'true'
     permissions:
       contents: read
     outputs:
@@ -154,9 +214,7 @@ jobs:
         id: corpus_key
         run: |
           set -euo pipefail
-          # workflow_dispatch honours the input; a PR is always smoke (a PR must
-          # not spend 20 minutes building the large corpus); cron is always full.
-          MODE="${{ inputs.mode || (github.event_name == 'pull_request' && 'smoke' || 'full') }}"
+          MODE="${{ inputs.mode || 'full' }}"
           echo "MODE=$MODE" >> "$GITHUB_ENV"
           if [ "$MODE" = "smoke" ]; then
             PROFILES="small"

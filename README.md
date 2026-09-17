@@ -11,8 +11,8 @@ inputs, licenses, allocator ownership, and the upstream update procedure.
 ## Link speed
 
 The COFF driver's PDB emission was parallelized and its input scan rewritten; the linker produces
-byte-identical EXE and PDB output and links substantially faster. The panel below is republished
-daily from `main` by the `link-benchmark` workflow.
+byte-identical EXE and PDB output and links substantially faster. The panels below are republished
+from `main` by the `link-benchmark` workflow, at most once a day and only when the commit has moved.
 
 [![Link speedup by thread count, one line per corpus; higher is better](https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speedup-threads.svg)](https://zackees.github.io/llvm-ld/#threads)
 

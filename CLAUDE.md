@@ -115,8 +115,14 @@ explicit path (or `rg --no-ignore`) when you actually need to read LLVM optimize
 
 ## Published link-speed charts
 
-`.github/workflows/link-benchmark.yml` republishes the panels daily from `main`. The pattern is
-copied from zackees/mimalloc-pprof's `benchmark-stats` workflow.
+`.github/workflows/link-benchmark.yml` republishes the panels from `main` at most once a day. The
+pattern is copied from zackees/mimalloc-pprof's `benchmark-stats` workflow.
+
+Cadence: a daily cron, plus `workflow_dispatch` and `workflow_call` so another workflow can ask
+for a refresh. A `precheck` job compares `github.sha` against `run.source_sha` in the published
+`latest.json` and skips the whole run when `main` has not moved, so an idle repository costs about
+a minute instead of a full measurement; pass `force: true` to measure anyway. Republishing an
+unchanged commit would only add runner noise to the history series.
 
 - The site is a flat directory of exactly `SITE_FILES` (`tools/bench_report.py`): `.nojekyll`,
   `index.html`, `latest.json`, `history.jsonl`, `manifest.json` and the two SVG panels. Adding a
