@@ -176,7 +176,14 @@ set(CMAKE_MODULE_LINKER_FLAGS_INIT "${_llvm_ld_link_flags_joined}")
 # 22.1.8 (see PROVENANCE.md). LLVM's own reference cross toolchain
 # (llvm/cmake/platforms/WinMsvc.cmake) has this identical latent gap; force it off explicitly
 # rather than trust `/manifest:no` alone.
-set(CMAKE_MT "CMAKE_MT-NOTFOUND" CACHE STRING "No external manifest tool: /manifest:no makes it unnecessary" FORCE)
+# Deliberately an empty string, not a `<name>-NOTFOUND` sentinel: CMake's find_program-family
+# commands specifically *re-run* their search whenever the existing cache value ends in
+# `-NOTFOUND` (that convention exists so a failed search retries on the next configure), so a
+# NOTFOUND sentinel here would just get overwritten right back to `/usr/bin/mt` by
+# CMakeFindBinUtils.cmake's own `find_program(CMAKE_MT ...)`. An empty string is not "not found"
+# by that convention -- find_program leaves an already-cached empty value alone -- and empty is
+# also falsy in the generator's `if(CMAKE_MT)` check, so the manifest-tool step is skipped.
+set(CMAKE_MT "" CACHE STRING "No external manifest tool: /manifest:no makes it unnecessary" FORCE)
 
 # Static CRT selection. This *must* live in the toolchain file, not only in the root
 # CMakeLists.txt, because the root CMakeLists.txt does not execute inside CMake's own
