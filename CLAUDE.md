@@ -66,7 +66,14 @@ explicit path (or `rg --no-ignore`) when you actually need to read LLVM optimize
      line in the PDB's `* Linker *` module and the PDB name in the EXE debug directory, so
      differing `/out:`/`/pdb:` names alone change the bytes. `bench.py` links everything to one
      path for this reason.
-  2. **Never benchmark while a build is running.** A concurrent 16-core build made the patched
+  2. **A/B an individual change against the previous candidate, not against the original
+     baseline.** Baseline wall time drifts several percent between sessions, which is larger than
+     most single changes. Copy the current binary aside, apply the change, rebuild, and run
+     `bench.py --candidate <new> --baseline <old>`; both produce identical bytes so the gate still
+     applies. A block-write coalescing change looked like +3% against the original baseline and
+     was **-2.5%** in a direct A/B; it was dropped. Cross-check any claimed win against the
+     `--time-trace` phase it was supposed to move.
+  3. **Never benchmark while a build is running.** A concurrent 16-core build made the patched
      linker look 10% *slower* single-threaded; on an idle machine it is 17% faster. Check
      `uptime` load first.
 - Things already done (Sep 2026): parallel PDB symbol-merging analysis, parallel section-

@@ -21,3 +21,4 @@
 /mingw-*.exe
 /build-perf/
 /build-*.log
+/build-tsan/
