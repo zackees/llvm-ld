@@ -1,0 +1,440 @@
+name: link-benchmark
+
+# Publishes the link-speed panels to the `benchmark-stats` data branch and to
+# GitHub Pages. The README hotlinks the SVGs straight off that branch.
+#
+# Every number is a paired A/B measured in one run on one machine: the current
+# linker against a baseline built from the payload as it stood before the
+# link-speed patches. Only six payload files differ between the two, so the
+# baseline is a ~40s incremental rebuild rather than a second full LLVM build.
+# Hosted runners are shared and noisy, so absolute wall time compared across
+# runs would publish that noise as signal; a paired ratio measured in a single
+# run does not. Both binaries also have to produce byte-identical EXE and PDB
+# before tests/perf/bench.py will report any timing at all.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "full (all corpora, publishes) or smoke (small corpus only, never publishes)"
+        type: choice
+        options: [full, smoke]
+        default: full
+      runs:
+        description: "Paired samples per cell"
+        type: number
+        default: 9
+        required: false
+      force:
+        description: "Measure even if main has not moved since the last publication"
+        type: boolean
+        default: false
+        required: false
+  # Callable from another workflow, e.g. a release pipeline that wants the
+  # panels refreshed at a specific point rather than waiting for the cron.
+  workflow_call:
+    inputs:
+      mode:
+        description: "full or smoke"
+        type: string
+        default: full
+        required: false
+      runs:
+        description: "Paired samples per cell"
+        type: number
+        default: 9
+        required: false
+      force:
+        description: "Measure even if main has not moved since the last publication"
+        type: boolean
+        default: false
+        required: false
+  # At most once a day. The precheck job below turns a run into a no-op when
+  # main has not moved since the last publication, so an idle repository costs
+  # about a minute rather than a full measurement.
+  schedule:
+    - cron: "41 7 * * *"
+
+# Never cancel or coalesce a publishing run: a half-finished push to the data
+# branch is worse than a queued run, and runs are rare enough that queuing is
+# not a concern.
+concurrency:
+  group: link-benchmark-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PUBLISH_REF: refs/heads/benchmark-stats
+  # The payload immediately before the link-speed patches (#14). The baseline
+  # linker is this commit's version of the six patched files.
+  BASELINE_REF: f9cdd65cbfb5f64654ce428524a8126652bed8a7
+
+jobs:
+  # Cheap guard so the daily cron does nothing when there is nothing new to
+  # measure. Republishing an identical measurement would only add runner noise
+  # to the history series.
+  precheck:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      should_run: ${{ steps.decide.outputs.should_run }}
+      prior_source_sha: ${{ steps.decide.outputs.prior_source_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: decide whether there is anything to measure
+        id: decide
+        run: |
+          set -euo pipefail
+          SHOULD_RUN=true
+          PRIOR_SOURCE=""
+          if git ls-remote --exit-code origin "$PUBLISH_REF" >/dev/null 2>&1; then
+            git fetch origin "$PUBLISH_REF" --depth=1
+            # Deliberately lenient: if the prior publication cannot be read,
+            # measure. Failing here would let one malformed branch block every
+            # future daily run, and an extra measurement is the cheaper error.
+            PRIOR_SOURCE=$(git show FETCH_HEAD:latest.json 2>/dev/null \
+              | python3 -c "import json,sys; print(json.load(sys.stdin)['run']['source_sha'])" \
+              2>/dev/null || true)
+            if [ -n "$PRIOR_SOURCE" ] && [ "$PRIOR_SOURCE" = "${{ github.sha }}" ] \
+               && [ "${{ inputs.force || false }}" != "true" ]; then
+              SHOULD_RUN=false
+            fi
+          fi
+          echo "should_run=$SHOULD_RUN" >> "$GITHUB_OUTPUT"
+          echo "prior_source_sha=$PRIOR_SOURCE" >> "$GITHUB_OUTPUT"
+          if [ "$SHOULD_RUN" = "false" ]; then
+            echo "main has not moved since the last publication ($PRIOR_SOURCE); skipping." \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  measure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    needs: precheck
+    if: needs.precheck.outputs.should_run == 'true'
+    permissions:
+      contents: read
+    outputs:
+      publish_eligible: ${{ steps.eligibility.outputs.publish_eligible }}
+      prior_branch_sha: ${{ steps.history.outputs.prior_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The baseline is reconstructed from history, so a shallow clone that
+          # lacks BASELINE_REF would silently make this unmeasurable.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: resolve prior publication
+        id: history
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code origin "$PUBLISH_REF" >/dev/null 2>&1; then
+            PRIOR_SHA=$(git ls-remote origin "$PUBLISH_REF" | awk '{print $1}')
+            echo "prior_sha=$PRIOR_SHA" >> "$GITHUB_OUTPUT"
+            git fetch origin "$PUBLISH_REF" --depth=1
+            # `git show` rather than `git checkout -- <path>`: reading the prior
+            # history must not touch the index or the worktree, because this job
+            # goes on to check payload files in and out to build the baseline.
+            if ! git show FETCH_HEAD:history.jsonl > "$RUNNER_TEMP/history-input.jsonl"; then
+              echo "::error::$PUBLISH_REF exists but carries no history.jsonl"
+              exit 1
+            fi
+          else
+            echo "prior_sha=first-publication" >> "$GITHUB_OUTPUT"
+            : > "$RUNNER_TEMP/history-input.jsonl"
+          fi
+
+      - name: runner metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          {
+            echo "image=$(grep '^PRETTY_NAME=' /etc/os-release | cut -d= -f2- | tr -d '\"')"
+            echo "cpu=$(lscpu | grep 'Model name:' | cut -d: -f2- | xargs)"
+            echo "cores=$(nproc)"
+            echo "kernel=$(uname -r)"
+            echo "arch=$(uname -m)"
+            echo "compiler=$(clang --version | head -1)"
+          } >> "$GITHUB_OUTPUT"
+
+      # LLVM_APPEND_VC_REV=OFF: with it ON, LLVM stamps the git revision into
+      # VCSRevision.h, so every commit changes LLVMSupport, which both defeats
+      # byte-identity comparisons and poisons the compiler cache.
+      - name: build the candidate linker
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_APPEND_VC_REV=OFF \
+            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+          cmake --build build --target llvm-ld-direct
+          mkdir -p "$RUNNER_TEMP/bin"
+          cp build/llvm-ld-direct "$RUNNER_TEMP/bin/candidate"
+
+      # Rebuild only the six patched payload files at their pre-optimization
+      # revision. The build tree is otherwise untouched, so this is a handful of
+      # translation units and a relink.
+      - name: build the baseline linker
+        run: |
+          set -euo pipefail
+          FILES=$(python3 -c "
+          import json
+          d = json.load(open('provenance/payload-prune.json'))
+          print(' '.join('llvm-project/' + e['path'] for e in d['patched'] if 'link-speed' in e['reason']))
+          ")
+          test -n "$FILES"
+          echo "baseline files: $FILES"
+          git checkout "$BASELINE_REF" -- $FILES
+          cmake --build build --target llvm-ld-direct
+          cp build/llvm-ld-direct "$RUNNER_TEMP/bin/baseline"
+          git checkout HEAD -- $FILES
+          cmake --build build --target llvm-ld-direct
+          # The guard in bench.py would catch this too, but failing here points
+          # at the real cause instead of at the measurement.
+          if cmp -s "$RUNNER_TEMP/bin/candidate" "$RUNNER_TEMP/bin/baseline"; then
+            echo "::error::baseline and candidate are the same binary; the payload has no link-speed delta"
+            exit 1
+          fi
+
+      # The corpora are deterministic given the generator, the compiler and the
+      # checkout path, and regenerating `large` costs 15-20 minutes on a hosted
+      # runner. Cache them. clang's version is in the key because the objects
+      # are its output; the path is not, because it is fixed in CI (CodeView
+      # objects embed absolute source paths, so a corpus is not portable
+      # between checkout locations).
+      - name: corpus cache key
+        id: corpus_key
+        run: |
+          set -euo pipefail
+          MODE="${{ inputs.mode || 'full' }}"
+          echo "MODE=$MODE" >> "$GITHUB_ENV"
+          if [ "$MODE" = "smoke" ]; then
+            PROFILES="small"
+          else
+            PROFILES="small medium large"
+          fi
+          echo "PROFILES=$PROFILES" >> "$GITHUB_ENV"
+          GEN_HASH=$(sha256sum tests/perf/gen_corpus.py | cut -c1-16)
+          CLANG_ID=$(clang --version | head -1 | tr -cd '[:alnum:].' )
+          echo "key=corpus-$MODE-$GEN_HASH-$CLANG_ID" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: build-perf/corpus
+          key: ${{ steps.corpus_key.outputs.key }}
+
+      - name: generate corpora
+        run: |
+          set -euo pipefail
+          # gen_corpus.py skips any object that is already present and current,
+          # so a restored cache makes this a no-op and a partial cache still
+          # only rebuilds what is missing.
+          for profile in $PROFILES; do
+            python3 tests/perf/gen_corpus.py --out build-perf/corpus --profile "$profile" \
+              --jobs "$(nproc)"
+          done
+
+      - name: measure
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cells"
+          RUNS="${{ inputs.runs || 9 }}"
+          MAX_THREADS="$(nproc)"
+          for profile in $PROFILES; do
+            for threads in 1 2 4 "$MAX_THREADS"; do
+              python3 tests/perf/bench.py \
+                --candidate "$RUNNER_TEMP/bin/candidate" \
+                --baseline "$RUNNER_TEMP/bin/baseline" \
+                --corpus "build-perf/corpus/$profile" \
+                --runs "$RUNS" --threads "$threads" \
+                --json "$RUNNER_TEMP/cells/$profile-t$threads.json"
+            done
+          done
+
+      - name: render site
+        run: |
+          set -euo pipefail
+          INIT_FLAG=""
+          if [ ! -s "$RUNNER_TEMP/history-input.jsonl" ]; then
+            INIT_FLAG="--initialize-history"
+          fi
+          python3 tools/bench_report.py render \
+            --cells-dir "$RUNNER_TEMP/cells" \
+            --history-in "$RUNNER_TEMP/history-input.jsonl" \
+            --output-dir "$RUNNER_TEMP/site" \
+            --detached-digest-out "$RUNNER_TEMP/manifest.sha256" \
+            --baseline-ref "$BASELINE_REF" \
+            --run-id "${{ github.run_id }}" \
+            --run-attempt "${{ github.run_attempt }}" \
+            --source-sha "${{ github.sha }}" \
+            --actions-run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --runner-image "${{ steps.meta.outputs.image }}" \
+            --runner-cpu "${{ steps.meta.outputs.cpu }}" \
+            --runner-cores "${{ steps.meta.outputs.cores }}" \
+            --runner-kernel "${{ steps.meta.outputs.kernel }}" \
+            --runner-arch "${{ steps.meta.outputs.arch }}" \
+            --runner-compiler "${{ steps.meta.outputs.compiler }}" \
+            $INIT_FLAG
+
+      - name: publication eligibility
+        id: eligibility
+        run: |
+          ELIGIBLE=false
+          if [ "${{ github.repository }}" = "zackees/llvm-ld" ] && \
+             [ "${{ github.ref }}" = "refs/heads/main" ] && \
+             [ "$MODE" = "full" ]; then
+            ELIGIBLE=true
+          fi
+          echo "publish_eligible=$ELIGIBLE" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: link-benchmark-site-${{ github.run_id }}
+          path: ${{ runner.temp }}/site/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: link-benchmark-cells-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/cells/
+            ${{ runner.temp }}/manifest.sha256
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # Re-validate the uploaded artifact in a clean job, so the artifact and the
+  # push are checked independently of the job that produced them.
+  audit-artifact:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: measure
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: link-benchmark-site-${{ github.run_id }}
+          path: audit/site/
+      - run: python3 tools/bench_report.py validate-site --site-dir audit/site/
+
+  publish-branch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: [measure, audit-artifact]
+    if: needs.measure.outputs.publish_eligible == 'true'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: link-benchmark-site-${{ github.run_id }}
+          path: site-temp/
+      - name: push benchmark-stats
+        run: |
+          set -euo pipefail
+          python3 tools/bench_report.py validate-site --site-dir site-temp/
+          MANIFEST_DIGEST=$(sha256sum site-temp/manifest.json | awk '{print $1}')
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          WORKTREE=$(mktemp -d)
+          git worktree add --detach "$WORKTREE" HEAD
+          python3 tools/bench_report.py prepare-branch \
+            --worktree "$WORKTREE" --site-dir "$GITHUB_WORKSPACE/site-temp"
+          cd "$WORKTREE"
+          git commit -q -m "link-benchmark run=${{ github.run_id }}/${{ github.run_attempt }} src=${{ github.sha }} manifest=$MANIFEST_DIGEST"
+          python3 "$GITHUB_WORKSPACE/tools/bench_report.py" validate-revision \
+            --repository "$WORKTREE" --revision HEAD \
+            --site-dir "$GITHUB_WORKSPACE/site-temp"
+          git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          PRIOR_SHA="${{ needs.measure.outputs.prior_branch_sha }}"
+          if [ "$PRIOR_SHA" = "first-publication" ]; then
+            git push origin "HEAD:$PUBLISH_REF"
+          else
+            # The lease is the guard against a racing publisher: if the branch
+            # moved since this run read it, the push is refused.
+            git push origin "HEAD:$PUBLISH_REF" \
+              --force-with-lease="refs/heads/benchmark-stats:$PRIOR_SHA"
+          fi
+          test "$(git ls-remote origin "$PUBLISH_REF" | awk '{print $1}')" = "$(git rev-parse HEAD)"
+          cd "$GITHUB_WORKSPACE"
+          git worktree remove --force "$WORKTREE"
+
+  package-pages:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: [measure, audit-artifact, publish-branch]
+    if: needs.measure.outputs.publish_eligible == 'true'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: link-benchmark-site-${{ github.run_id }}
+          path: _site/
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site/
+          include-hidden-files: true
+
+  deploy-pages:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: [measure, audit-artifact, publish-branch, package-pages]
+    if: needs.measure.outputs.publish_eligible == 'true'
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v4
+        id: deployment
+
+  publication-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: [measure, publish-branch, deploy-pages]
+    if: needs.measure.outputs.publish_eligible == 'true'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: link-benchmark-site-${{ github.run_id }}
+          path: audit/site/
+      - name: audit the published branch and deployment
+        run: |
+          set -euo pipefail
+          git fetch origin "$PUBLISH_REF" --depth=1
+          python3 tools/bench_report.py validate-revision \
+            --repository . --revision FETCH_HEAD --site-dir audit/site/
+          python3 tools/bench_report.py audit-pages \
+            --site-dir audit/site/ \
+            --page-url "${{ needs.deploy-pages.outputs.page_url }}"
+          {
+            echo "## Link benchmark published"
+            echo "- Pages: ${{ needs.deploy-pages.outputs.page_url }}"
+            echo "- Run: ${{ github.run_id }}/${{ github.run_attempt }}"
+          } >> "$GITHUB_STEP_SUMMARY"

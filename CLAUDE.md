@@ -113,6 +113,52 @@ explicit path (or `rg --no-ignore`) when you actually need to read LLVM optimize
   process. If revisited, the memory must be bounded first, and the win re-measured before the
   memory cost is accepted.
 
+## Published link-speed charts
+
+`.github/workflows/link-benchmark.yml` republishes the panels from `main` at most once a day. The
+pattern is copied from zackees/mimalloc-pprof's `benchmark-stats` workflow.
+
+Cadence: a daily cron, plus `workflow_dispatch` and `workflow_call` so another workflow can ask
+for a refresh. A `precheck` job compares `github.sha` against `run.source_sha` in the published
+`latest.json` and skips the whole run when `main` has not moved, so an idle repository costs about
+a minute instead of a full measurement; pass `force: true` to measure anyway. Republishing an
+unchanged commit would only add runner noise to the history series.
+
+- The site is a flat directory of exactly `SITE_FILES` (`tools/bench_report.py`): `.nojekyll`,
+  `index.html`, `latest.json`, `history.jsonl`, `manifest.json` and the two SVG panels. Adding a
+  file means adding it to `SITE_FILES`, `FILE_CAPS`, `MEDIA_TYPES` and `ROLES`, or validation
+  fails both ways (missing *and* unexpected files are errors).
+- It is sealed by `manifest.json` (path/size/sha256/media type/role per file) plus a detached
+  `manifest.sha256` written *outside* the site tree. `validate_site` is the chokepoint and is
+  called by render, prepare-branch, validate-revision and audit-pages, and again from a separate
+  CI job on the downloaded artifact, so the artifact and the push are checked independently.
+- Publication pushes to the `benchmark-stats` branch with `--force-with-lease` against the SHA
+  read at the start of the run; the branch carries no accumulated history, the time series lives
+  in `history.jsonl` (capped at 1000 rows). The README hotlinks the SVGs off that branch by
+  *branch name*, never a commit SHA, so GitHub's camo proxy revalidates when the blob changes.
+- Panels are hand-written SVG, stdlib only, dark palette, fixed-pixel layout. `validate_svg`
+  requires a `viewBox` and forbids script, `foreignObject`, `xlink:href`, `<image>`, `@import`,
+  inline event handlers and any non-w3.org URL: they are hotlinked into a README and must be
+  inert. `index.html` may link out but never *load* out, and every `<img>` needs alt text.
+- Rendering must stay byte-deterministic: all JSON goes through `compact_json` (sorted keys, no
+  spaces, trailing newline), or the manifest digest is meaningless.
+
+### What the numbers mean, and the trap they avoid
+
+Each cell is a paired A/B in one run on one machine: the current linker against a baseline built
+by checking out the six link-speed payload files at `BASELINE_REF` and rebuilding incrementally
+(~40s), then linking the same corpus interleaved. Absolute wall time across runs is deliberately
+not published because hosted runners are shared; see the measurement traps above.
+
+A trap specific to this setup, which cost a full measurement round: after restoring the payload
+files you **must rebuild**, or the candidate binary silently *is* the baseline and every number
+collapses to noise while every correctness gate still passes. `bench.py` now refuses to run when
+the two binaries are byte-identical, and the workflow checks the same thing with a clearer error.
+
+Corpora are path-dependent: CodeView objects embed absolute source paths, so the same generator
+run at a different directory produces different object bytes. That is fine for CI (stable path)
+but means a corpus cannot be shared between machines by hash.
+
 ## Correctness constraints on any optimization
 
 - `tests/gold_link.ps1` / `tests/windows_correctness.ps1` require byte-identical output against

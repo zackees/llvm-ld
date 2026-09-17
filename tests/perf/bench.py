@@ -48,6 +48,15 @@ def main() -> int:
     corpus = a.corpus.resolve(); rsp = corpus / "link.rsp"
     extra = list(a.extra) + ([f"/threads:{a.threads}"] if a.threads else [])
     cand = str(pathlib.Path(a.candidate).resolve()); base = str(pathlib.Path(a.baseline).resolve()) if a.baseline else None
+    # Comparing a binary against itself yields a meaningless ~0% and every
+    # correctness gate still passes, because the outputs really are identical.
+    # This happens for real: forget to rebuild after restoring sources and the
+    # candidate silently *is* the baseline.
+    if base and sha(pathlib.Path(cand)) == sha(pathlib.Path(base)):
+        raise SystemExit(
+            f"candidate and baseline are the same binary ({cand} == {base}); "
+            "rebuild one of them before measuring"
+        )
     work = pathlib.Path(tempfile.mkdtemp(prefix="llvm-ld-bench-"))
     try:
         if a.time:
