@@ -143,6 +143,35 @@ unchanged commit would only add runner noise to the history series.
 - Rendering must stay byte-deterministic: all JSON goes through `compact_json` (sorted keys, no
   spaces, trailing newline), or the manifest digest is meaningless.
 
+### Where the binaries come from
+
+link-benchmark does not compile LLVM in its common path. `ci.yml`'s `build-linux` job, on push to
+`main` only (never on PRs), after its closure audit and `ctest`, copies `build/llvm-ld-direct`
+aside as the candidate, checks the link-speed payload files out at `BASELINE_REF`, rebuilds
+incrementally, copies the baseline, and restores the files (no third rebuild). It then uploads
+`candidate`, `baseline` and `bench-bins.json` (`source_sha`, `baseline_ref`, `files`, `compiler`,
+`run_id`) as artifact `llvm-ld-bench-bins-<sha>` (90-day retention). `link-benchmark`'s `measure`
+job downloads that artifact for `github.sha` via `gh run list`/`gh run download` (needs
+`actions: read`), verifies `source_sha`, `baseline_ref`, the files list and `clang --version`
+against itself, and on any miss or mismatch falls back to the old in-job build (with
+`SCCACHE_GHA_ENABLED`). The identical-binary guard runs on both paths. The `measure` job timeout
+is 240 minutes so a cold fallback build cannot time out (see #20).
+
+Invariants that must be kept in sync across both workflows: both build Linux with `clang`/
+`clang++` and `-DCMAKE_BUILD_TYPE=Release -DLLVM_APPEND_VC_REV=OFF`; `BASELINE_REF` is declared in
+both `ci.yml` (the `build-linux` baseline step's env) and `link-benchmark.yml`; and the `FILES`
+derivation from `provenance/payload-prune.json` exists in `ci.yml` and twice in
+`link-benchmark.yml` (download verification and the fallback build) and must stay identical. Drift
+is not silent: `link-benchmark` falls back to a cold build, and the step summary states which path
+ran. clang was picked over a runner-image default because it matches the compiler the benchmark
+already records and the clang-generated corpora, and because compile caches key on the compiler,
+so one warm sccache serves both workflows.
+
+zccache (PR #18) was closed as superseded: the benchmark no longer compiles in the common path, so
+there is nothing left on that path for a compiler cache to speed up. zccache adoption for `ci.yml`
+is future work tracked under #20; build-tree caching is #21 (blocked on
+`zackees/zccache#1595` and `zackees/soldr#3289`).
+
 ### What the numbers mean, and the trap they avoid
 
 Each cell is a paired A/B in one run on one machine: the current linker against a baseline built
@@ -154,6 +183,8 @@ A trap specific to this setup, which cost a full measurement round: after restor
 files you **must rebuild**, or the candidate binary silently *is* the baseline and every number
 collapses to noise while every correctness gate still passes. `bench.py` now refuses to run when
 the two binaries are byte-identical, and the workflow checks the same thing with a clearer error.
+CI avoids the trap entirely: the candidate is copied aside *before* the payload swap, and there is
+no rebuild after the files are restored, so there is no third rebuild to forget in the first place.
 
 Corpora are path-dependent: CodeView objects embed absolute source paths, so the same generator
 run at a different directory produces different object bytes. That is fine for CI (stable path)
