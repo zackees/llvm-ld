@@ -31,6 +31,10 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       SCCACHE_GHA_ENABLED: "true"
+      # Pinned zccache release used to snapshot/replay source-tree mtimes around the cached
+      # build tree below (see the "Install zccache" step for the checksum-before-trust flow).
+      ZCCACHE_VERSION: "1.14.0"
+      ZCCACHE_SHA256: "f4481a079f9accb827c249f742e60119d212025c15b1fe70b2ad4681f61b5531"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -38,6 +42,110 @@ jobs:
           # commit, which a shallow clone does not contain.
           fetch-depth: 0
       - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: Install zccache (pinned 1.14.0)
+        run: |
+          set -euo pipefail
+          # Checksum-before-trust, the same recipe the "Install pinned clang/lld" step in
+          # build-linux-cross uses: verify the tarball's SHA-256 before extracting or running it.
+          URL="https://github.com/zackees/zccache/releases/download/${ZCCACHE_VERSION}/zccache-v${ZCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/zccache.tar.gz" "$URL"
+          echo "${ZCCACHE_SHA256}  $RUNNER_TEMP/zccache.tar.gz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/zccache"
+          tar -xzf "$RUNNER_TEMP/zccache.tar.gz" -C "$RUNNER_TEMP/zccache"
+          echo "$RUNNER_TEMP/zccache/zccache-v${ZCCACHE_VERSION}-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+          # Confirm the pinned binary and the flags this job depends on before trusting it later.
+          ZCCACHE_BIN="$RUNNER_TEMP/zccache/zccache-v${ZCCACHE_VERSION}-x86_64-unknown-linux-musl/zccache"
+          "$ZCCACHE_BIN" --version
+          "$ZCCACHE_BIN" snapshot --help
+          "$ZCCACHE_BIN" replay --help
+      - name: Build-tree cache key
+        id: tree-key
+        run: |
+          set -euo pipefail
+          # Hashing the full --version output (not just a parsed version string) rotates the key
+          # on any toolchain change, including an apt point release invisible to hashFiles.
+          IDENTITY="$(clang --version; clang++ --version; cmake --version; ninja --version)"
+          echo "$IDENTITY"
+          COMPILER=$(printf '%s' "$IDENTITY" | sha256sum | cut -c1-16)
+          echo "compiler=$COMPILER" >> "$GITHUB_OUTPUT"
+      - name: Restore build tree cache
+        id: tree-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: build
+          # Primary key covers everything that affects the build: an exact hit means the
+          # configure and build steps below are a no-op. restore-keys drop the source/CMake hash
+          # suffix, keying only on the payload closure and compiler identity, so a PR that only
+          # touches our own sources (not upstream/, not the toolchain) still gets a partial hit to
+          # replay mtimes against. Correctness never depends on which key matched -- it comes from
+          # the content-verified replay step below, which only restores an mtime onto a file whose
+          # size and BLAKE3 still match what was recorded.
+          #
+          # The mtime manifest (build/.zccache-mtimes.json) lives inside the cached tree itself:
+          # it is written by "zccache snapshot --exclude build", so build/ excluding itself from
+          # its own manifest is exactly why `path: build` is enough to restore both the tree and
+          # the manifest describing it.
+          key: build-linux-tree-v1-${{ steps.tree-key.outputs.compiler }}-${{ hashFiles('provenance/llvm-source-closure.json', 'provenance/payload-prune.json') }}-${{ hashFiles('provenance/**', 'CMakeLists.txt', 'exports.map', 'cmake/**', 'src/**', 'include/**', 'tools/**', 'tests/**', '.github/workflows/ci.yml') }}
+          restore-keys: |
+            build-linux-tree-v1-${{ steps.tree-key.outputs.compiler }}-${{ hashFiles('provenance/llvm-source-closure.json', 'provenance/payload-prune.json') }}-
+      # upstream/ (mimalloc, libxml2) is gitignored and not cached; importing it before the
+      # replay step below lets the replay give those checksum-verified files their recorded
+      # mtimes too, instead of leaving them at their fresh import timestamp. cmake/Import.cmake
+      # would otherwise only run this during configure, which happens after the replay.
+      - name: Import locked upstream inputs
+        run: python tools/import.py --mimalloc-only
+      - name: Replay source mtimes (zccache)
+        if: steps.tree-restore.outputs.cache-matched-key != ''
+        id: replay
+        run: |
+          set -uo pipefail
+          MANIFEST="build/.zccache-mtimes.json"
+          if [ ! -f "$MANIFEST" ]; then
+            echo "::warning::no $MANIFEST in the restored build tree; every source keeps its fresh checkout mtime, so Ninja rebuilds everything (slower, still correct)"
+            exit 0
+          fi
+          # No set -e here, so the exit code is captured rather than aborting the step.
+          zccache replay --workspace "$GITHUB_WORKSPACE" --manifest "$MANIFEST" --json > "$RUNNER_TEMP/replay.json"
+          RC=$?
+          if [ "$RC" -ne 0 ]; then
+            echo "::warning::zccache replay failed (exit $RC); every source keeps its fresh checkout mtime, so Ninja rebuilds everything (slower, still correct)"
+            exit 0
+          fi
+          # Safety argument: zccache only rewrites the mtime of a file whose size and BLAKE3
+          # still match the recorded snapshot. Anything missing, size-mismatched, or otherwise
+          # modified keeps the checkout's fresh mtime (newer than any restored object file), so
+          # Ninja rebuilds it from source. A low applied_ratio only costs build time, never
+          # correctness.
+          python3 -c "
+          import json, os
+          d = json.load(open(os.path.join(os.environ['RUNNER_TEMP'], 'replay.json')))
+          applied = d['applied']
+          missing = d['missing']
+          size_mismatch = d['size_mismatch']
+          modified = d['modified']
+          total = d['total']
+          ratio = d['applied_ratio']
+          print('applied=%d missing=%d size_mismatch=%d modified=%d total=%d ratio=%.4f' % (applied, missing, size_mismatch, modified, total, ratio))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write('applied=%d\n' % applied)
+              f.write('missing=%d\n' % missing)
+              f.write('size_mismatch=%d\n' % size_mismatch)
+              f.write('modified=%d\n' % modified)
+              f.write('total=%d\n' % total)
+              f.write('ratio=%.4f\n' % ratio)
+          hit_kind = 'exact' if os.environ.get('CACHE_HIT') == 'true' else 'partial'
+          matched_key = os.environ.get('MATCHED_KEY', '')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write('### zccache mtime replay\n\n')
+              f.write('| applied | missing | size_mismatch | modified | total | ratio | hit | matched key |\n')
+              f.write('|---|---|---|---|---|---|---|---|\n')
+              f.write('| %d | %d | %d | %d | %d | %.3f | %s | %s |\n' % (applied, missing, size_mismatch, modified, total, ratio, hit_kind, matched_key))
+          if ratio < 0.90:
+              print('::warning::zccache replay applied only %d of %d recorded mtimes (ratio %.4f); expect a larger rebuild' % (applied, total, ratio))
+          "
+        env:
+          CACHE_HIT: ${{ steps.tree-restore.outputs.cache-hit }}
+          MATCHED_KEY: ${{ steps.tree-restore.outputs.cache-matched-key }}
       - run: mkdir -p build/.cmake/api/v1/query && touch build/.cmake/api/v1/query/codemodel-v2
       # LLVM_APPEND_VC_REV=OFF everywhere below: with it ON, LLVM stamps the git revision into the
       # generated VCSRevision.h, so every commit changes LLVMSupport and therefore llvm_ld.dll -
@@ -52,7 +160,38 @@ jobs:
       # drift silently when the runner image changes its default. The first clang run of this job
       # is a one-time cold sccache.
       - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_APPEND_VC_REV=OFF -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace.jsonl
+      - name: Ninja planned work
+        id: ninja-plan
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          # Same target list as the "cmake --build" step below -- keep them identical, so this
+          # dry run reports exactly the work that step is about to do.
+          ninja -C build -n -d explain llvm_ld abi_smoke abi_contract abi_state_test allocator-probe llvm-ld-runner llvm-ld-direct > "$RUNNER_TEMP/ninja-plan.txt" 2> "$RUNNER_TEMP/ninja-explain.txt"
+          EDGES=$(grep -c '^\[' "$RUNNER_TEMP/ninja-plan.txt" || true)
+          echo "Ninja planned edges: $EDGES"
+          echo "--- first 40 lines of ninja -d explain ---"
+          head -n 40 "$RUNNER_TEMP/ninja-explain.txt"
+          echo "edges=$EDGES" >> "$GITHUB_OUTPUT"
+          if [ "${{ steps.tree-restore.outputs.cache-hit }}" = "true" ]; then
+            STATUS=exact
+          elif [ -n "${{ steps.tree-restore.outputs.cache-matched-key }}" ]; then
+            STATUS=partial
+          else
+            STATUS=miss
+          fi
+          echo "Ninja planned edges: $EDGES (cache: $STATUS)" >> "$GITHUB_STEP_SUMMARY"
       - run: cmake --build build --target llvm_ld abi_smoke abi_contract abi_state_test allocator-probe llvm-ld-runner llvm-ld-direct
+      - name: Snapshot source mtimes (zccache)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.tree-restore.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          # Runs right after the build and before the audit/export/ctest steps below create
+          # build-inputs.txt, build-deps.txt, actual-exports.txt etc. in the workspace root, so
+          # those transient files never land in the manifest. cmake-trace.jsonl does get
+          # snapshotted; it is harmlessly reported "missing" on a future replay.
+          zccache snapshot --workspace "$GITHUB_WORKSPACE" --out build/.zccache-mtimes.json --exclude build
+          du -sh build
       - name: sccache stats
         if: always()
         continue-on-error: true
@@ -72,6 +211,18 @@ jobs:
           printf 'llvm_ld_abi_version\nllvm_ld_allocator_get_info\nllvm_ld_invoke\nllvm_ld_profiler_start\nllvm_ld_profiler_stop\n' > expected-exports.txt
           diff -u expected-exports.txt actual-exports.txt
       - run: ctest --test-dir build --output-on-failure
+      # Saved here -- after ctest, before the baseline step below -- because the baseline step
+      # checks out BASELINE_REF payload files and rebuilds llvm-ld-direct in build/, which would
+      # otherwise poison the cached tree with baseline-built objects; saving first keeps the
+      # cached tree equal to HEAD. Plain `if:` implies success(), so a failed audit/export/ctest
+      # never saves a broken tree. Only runs on push to main, protecting the 10 GB Actions cache
+      # budget (sccache already uses roughly 2 GB of it) -- PRs restore main's entries read-only.
+      - name: Save build tree cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.tree-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build
+          key: ${{ steps.tree-restore.outputs.cache-primary-key }}
       - name: build the link-benchmark baseline linker (main only)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:

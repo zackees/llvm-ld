@@ -170,9 +170,46 @@ already records and the clang-generated corpora, and because compile caches key 
 so one warm sccache serves both workflows.
 
 zccache (PR #18) was closed as superseded: the benchmark no longer compiles in the common path, so
-there is nothing left on that path for a compiler cache to speed up. zccache adoption for `ci.yml`
-is future work tracked under #20; build-tree caching is #21 (blocked on
-`zackees/zccache#1595` and `zackees/soldr#3289`).
+there is nothing left on that path for a compiler cache to speed up. `ci.yml` now uses zccache
+only for mtime snapshot/replay around the `build-linux` build-tree cache (#21, below); further
+zccache adoption is tracked under #20.
+
+### build-linux build-tree cache (#21)
+
+`ci.yml`'s `build-linux` job keeps `sccache` (GHA backend) for compiled objects and layers a
+build-tree cache on top of it: before configure, `actions/cache/restore` restores `build/` itself.
+The primary key is `build-linux-tree-v1-<compiler-id>-<hash(llvm-source-closure.json,
+payload-prune.json)>-<hash(provenance/**, CMakeLists.txt, exports.map, cmake/**, src/**,
+include/**, tools/**, tests/**, ci.yml)>`; `restore-keys` fall back to the prefix keyed only on
+compiler identity (`clang`/`clang++`/`cmake`/`ninja --version`) plus the payload closure and
+payload-prune, so a PR that only changes first-party sources still gets a partial hit.
+
+zccache 1.14.0 (a pinned release binary, sha256-checked) supplies `zccache snapshot` and
+`zccache replay`, used only to restore source-tree mtimes (the workspace minus `build/`); it is
+not a compiler launcher here. After the restore (and after
+`tools/import.py --mimalloc-only` recreates `upstream/`), `zccache replay` restores the recorded
+mtime onto a file only when its size and BLAKE3 still match the manifest
+`build/.zccache-mtimes.json`; a changed, missing or unverifiable file keeps its fresh-checkout
+mtime, so Ninja rebuilds exactly that file. Correctness comes from this content-verified replay,
+never from the cache key and never from a blunt `touch`: Ninja compares mtimes, not content, and a
+blunt touch would silently reuse stale objects. A low applied ratio (below 0.90) or a replay error
+only emits a `::warning::` in the step summary; it does not fail the job.
+
+A `ninja -n -d explain` dry run runs before the real build and reports the planned edge count in
+the step summary; that count is the evidence for the speed-up, and an exact hit should plan
+roughly zero upstream edges.
+
+Only a push to `main` runs `zccache snapshot` (`--exclude build`, right after the build and before
+the audit-file steps appear) and saves the `build/` tree with `actions/cache/save`, after `ctest`
+and before the baseline step, because the baseline step rebuilds `llvm-ld-direct` from
+`BASELINE_REF` files and must not be cached. PRs never save, to protect the 10 GB Actions cache
+budget shared with `sccache`.
+
+Invariant: the ninja dry-run target list must equal the real build step's target list; the audit,
+export-allowlist, `ctest`, `payload_reproducer` and bench-bins steps are unchanged. zccache as a
+compiler launcher (PR #18) remains closed as superseded, and #21's original design of durable
+storage (a Release asset or GHCR) is not implemented: this is Actions cache only, so eviction just
+means the next build falls back to a cold, sccache-backed build.
 
 ### What the numbers mean, and the trap they avoid
 
