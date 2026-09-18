@@ -47,7 +47,11 @@ jobs:
           # pipx avoids PEP 668 on the image's system Python and does not change the Python
           # CMake finds.
           pipx install zccache==1.14.0
-          zccache --version
+          # Hosted runners already have PIPX_BIN_DIR on PATH; containers (act, self-hosted)
+          # may not, so export it for later steps explicitly.
+          bin_dir="$(pipx environment --value PIPX_BIN_DIR)"
+          echo "$bin_dir" >> "$GITHUB_PATH"
+          "$bin_dir/zccache" --version
       - name: ci_build.py tests
         run: python -m unittest discover -s tests -p 'test_ci_build.py' -v
       - name: Build-tree cache key
