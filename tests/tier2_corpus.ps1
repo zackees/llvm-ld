@@ -6,7 +6,9 @@
 # and import library are byte-identical run-vs-run and across sides, then runs the EXE natively.
 #
 # Sides: stock (llvm-ld-direct) and wrapper (llvm-ld-runner) always. With -ExternalLld, also the
-# official release lld-link.exe (issue #30), compared against stock.
+# official release lld-link.exe (issue #30), compared against llvm-ld-direct through
+# tools/coff_external_compare.py, which accounts for the one explained build-configuration
+# difference (see that file) and fails on anything else.
 #
 # Determinism rules (see #6): identical /threads and /opt:lldltojobs on every side, no
 # /lldltocache, default /opt:lldltopartitions, /Brepro /manifest:no /lldignoreenv with CRT/SDK
@@ -31,6 +33,7 @@ function Resolve-Tool([string]$name) {
 $stockLld = Resolve-Tool 'llvm-ld-direct.exe'
 $runner = Resolve-Tool 'llvm-ld-runner.exe'
 $triage = (Resolve-Path (Join-Path $PSScriptRoot '../tools/pe_triage.py')).Path
+$externalCompare = (Resolve-Path (Join-Path $PSScriptRoot '../tools/coff_external_compare.py')).Path
 $corpus = (Resolve-Path (Join-Path $PSScriptRoot 'tier2')).Path
 
 $sides = @('stock', 'wrapper')
@@ -163,11 +166,34 @@ foreach ($mode in $Modes) {
       $name = [IO.Path]::GetFileNameWithoutExtension($artifact)
       $ext = [IO.Path]::GetExtension($artifact)
       Assert-SameArtifact "$name-stock-1$ext" "$name-wrapper-1$ext" "tier2 [$mode] $artifact stock-vs-wrapper"
-      if ($ExternalLld) {
-        Assert-SameArtifact "$name-external-stock-1$ext" "$name-external-1$ext" "tier2 [$mode] $artifact llvm-ld-direct-vs-release-lld-link"
-      }
     }
-    Write-Host "tier2 [$mode]: $($artifacts -join ', ') byte-identical across $($sides -join ', ') (2 runs each)"
+    Write-Host "tier2 [$mode]: $($artifacts -join ', ') byte-identical run-vs-run and stock-vs-wrapper"
+
+    if ($ExternalLld) {
+      # llvm-ld-direct vs the release lld-link.exe. The import library must be byte-identical. The
+      # images and PDBs must be too, except for one build-configuration difference that
+      # tools/coff_external_compare.py documents, checks field by field, and normalizes: the
+      # DataCrc of empty-content chunks (LLVM_ENABLE_ZLIB=OFF here, zlib in the release) and the
+      # content-hash build-id fields derived from it. Any other difference fails.
+      Assert-SameArtifact 'tier2lib-external-stock-1.lib' 'tier2lib-external-1.lib' "tier2 [$mode] tier2lib.lib llvm-ld-direct-vs-release-lld-link"
+      foreach ($image in 'tier2.exe', 'tier2lib.dll') {
+        $name = [IO.Path]::GetFileNameWithoutExtension($image)
+        $ext = [IO.Path]::GetExtension($image)
+        python $externalCompare "$name-external-stock-1$ext" "$name-external-1$ext" --ours-pdb "$name-external-stock-1.pdb" --release-pdb "$name-external-1.pdb"
+        if ($LASTEXITCODE -ne 0) {
+          Assert-SameArtifact "$name-external-stock-1$ext" "$name-external-1$ext" "tier2 [$mode] $image llvm-ld-direct-vs-release-lld-link"
+          throw "tier2 [$mode] $image llvm-ld-direct-vs-release-lld-link: coff_external_compare.py exit $LASTEXITCODE"
+        }
+      }
+      # Negative control: the comparer must reject a one-byte change in the release image's code.
+      $bytes = [IO.File]::ReadAllBytes((Join-Path (Get-Location) 'tier2-external-1.exe'))
+      $bytes[0x1000] = $bytes[0x1000] -bxor 1
+      [IO.File]::WriteAllBytes((Join-Path (Get-Location) 'negative-control.exe'), $bytes)
+      python $externalCompare tier2-external-stock-1.exe negative-control.exe --ours-pdb tier2-external-stock-1.pdb --release-pdb tier2-external-1.pdb | Out-Null
+      if ($LASTEXITCODE -ne 1) { throw "tier2 [$mode] negative control: coff_external_compare.py accepted a corrupted image (exit $LASTEXITCODE)" }
+      Remove-Item negative-control.exe
+      Write-Host "tier2 [$mode]: release lld-link.exe matches llvm-ld-direct (import library byte-identical; images/PDBs modulo the explained fields)"
+    }
 
     # The last link left tier2.exe and tier2lib.dll side by side; all sides are identical by now.
     Invoke-Checked "tier2 [$mode] native execution" { .\tier2.exe }
