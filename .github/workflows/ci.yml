@@ -22,6 +22,9 @@ jobs:
         with: {python-version: '3.12'}
       - run: python tools/import.py --mimalloc-only
       - run: python tools/verify.py --root . --positive-controls
+      # Link-speed report renderer and benchmark statistics (stdlib only, no linker needed).
+      - name: bench_report.py and bench.py tests
+        run: python -m unittest discover -s tests -p 'test_bench_*.py' -v
       - name: Timing configuration cannot enable profiling
         run: |
           unset MIMALLOC_DHAT MIMALLOC_DHAT_DUMP_AT_EXIT MIMALLOC_PROF_ACTIVE MI_PPROF

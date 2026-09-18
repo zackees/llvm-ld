@@ -14,11 +14,14 @@ name: link-benchmark
 # run does not. Both binaries also have to produce byte-identical EXE and PDB
 # before tests/perf/bench.py will report any timing at all.
 #
-# The measured thread counts are 1, 2 and 4, plus the runner's core count
-# (nproc) when it is larger than 4, each measured once. On a 4-core hosted
-# runner the highest measured count is therefore 4, so the history panel's
-# "highest measured thread count" tracks 4 threads, not the 16-thread regime
-# behind the headline figure in CLAUDE.md.
+# What is measured is the matrix `tests/perf/gen_corpus.py --print-matrix`
+# prints: every build mode in gen_corpus.MODES (Debug + PDB, Release + PDB,
+# Release without a PDB as a control, ThinLTO + PDB) x its corpora x its
+# thread counts. Non-LTO modes measure 1, 2 and 4 threads plus nproc when it is
+# larger than 4; ThinLTO measures only the highest count, on `small` only,
+# with `lto_runs` samples, because every ThinLTO link runs LLVM codegen. On a
+# 4-core hosted runner the highest count is therefore 4, not the 16-thread
+# regime behind the headline figure in CLAUDE.md.
 
 on:
   workflow_dispatch:
@@ -29,9 +32,14 @@ on:
         options: [full, smoke]
         default: full
       runs:
-        description: "Paired samples per cell"
+        description: "Paired samples per cell (>= 4)"
         type: number
         default: 9
+        required: false
+      lto_runs:
+        description: "Paired samples per ThinLTO cell (>= 4; each link runs codegen)"
+        type: number
+        default: 5
         required: false
       force:
         description: "Measure even if main has not moved since the last publication"
@@ -48,9 +56,14 @@ on:
         default: full
         required: false
       runs:
-        description: "Paired samples per cell"
+        description: "Paired samples per cell (>= 4)"
         type: number
         default: 9
+        required: false
+      lto_runs:
+        description: "Paired samples per ThinLTO cell (>= 4)"
+        type: number
+        default: 5
         required: false
       force:
         description: "Measure even if main has not moved since the last publication"
@@ -83,7 +96,7 @@ env:
 jobs:
   # Cheap guard so the daily cron does nothing when there is nothing new to
   # measure. Republishing an identical measurement would only add runner noise
-  # to the history series.
+  # to the published numbers.
   precheck:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -132,7 +145,7 @@ jobs:
       actions: read
     outputs:
       publish_eligible: ${{ steps.eligibility.outputs.publish_eligible }}
-      prior_branch_sha: ${{ steps.history.outputs.prior_sha }}
+      prior_branch_sha: ${{ steps.prior.outputs.prior_sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -231,24 +244,18 @@ jobs:
       - uses: mozilla-actions/sccache-action@v0.0.11
         if: steps.prebuilt.outputs.found != 'true'
 
+      # The site shows only the current run, so nothing is read from the prior
+      # publication; its commit is recorded for publish-branch's
+      # --force-with-lease.
       - name: resolve prior publication
-        id: history
+        id: prior
         run: |
           set -euo pipefail
           if git ls-remote --exit-code origin "$PUBLISH_REF" >/dev/null 2>&1; then
             PRIOR_SHA=$(git ls-remote origin "$PUBLISH_REF" | awk '{print $1}')
             echo "prior_sha=$PRIOR_SHA" >> "$GITHUB_OUTPUT"
-            git fetch origin "$PUBLISH_REF" --depth=1
-            # `git show` rather than `git checkout -- <path>`: reading the prior
-            # history must not touch the index or the worktree, because this job
-            # goes on to check payload files in and out to build the baseline.
-            if ! git show FETCH_HEAD:history.jsonl > "$RUNNER_TEMP/history-input.jsonl"; then
-              echo "::error::$PUBLISH_REF exists but carries no history.jsonl"
-              exit 1
-            fi
           else
             echo "prior_sha=first-publication" >> "$GITHUB_OUTPUT"
-            : > "$RUNNER_TEMP/history-input.jsonl"
           fi
 
       - name: runner metadata
@@ -357,12 +364,16 @@ jobs:
           set -euo pipefail
           MODE="${{ inputs.mode || 'full' }}"
           echo "MODE=$MODE" >> "$GITHUB_ENV"
+          SMOKE_FLAG=""
           if [ "$MODE" = "smoke" ]; then
-            PROFILES="small"
-          else
-            PROFILES="small medium large"
+            SMOKE_FLAG="--smoke"
           fi
-          echo "PROFILES=$PROFILES" >> "$GITHUB_ENV"
+          # The measurement matrix (build mode, corpus, threads, runs), from
+          # the single definition in gen_corpus.MODES.
+          python3 tests/perf/gen_corpus.py --print-matrix --max-threads "$(nproc)" $SMOKE_FLAG \
+            --runs "${{ inputs.runs || 9 }}" --lto-runs "${{ inputs.lto_runs || 5 }}" \
+            > "$RUNNER_TEMP/matrix.txt"
+          echo "measurement matrix:"; cat "$RUNNER_TEMP/matrix.txt"
           GEN_HASH=$(sha256sum tests/perf/gen_corpus.py | cut -c1-16)
           CLANG_ID=$(clang --version | head -1 | tr -cd '[:alnum:].' )
           echo "key=corpus-$MODE-$GEN_HASH-$CLANG_ID" >> "$GITHUB_OUTPUT"
@@ -377,42 +388,38 @@ jobs:
           # gen_corpus.py skips any object that is already present and current,
           # so a restored cache makes this a no-op and a partial cache still
           # only rebuilds what is missing.
-          for profile in $PROFILES; do
-            python3 tests/perf/gen_corpus.py --out build-perf/corpus --profile "$profile" \
-              --jobs "$(nproc)"
+          awk '{print $1, $2}' "$RUNNER_TEMP/matrix.txt" | sort -u | while read -r mode profile; do
+            python3 tests/perf/gen_corpus.py --out build-perf/corpus --mode "$mode" \
+              --profile "$profile" --jobs "$(nproc)"
           done
+          echo "corpus size: $(du -sh build-perf/corpus | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: measure
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/cells"
-          RUNS="${{ inputs.runs || 9 }}"
-          MAX_THREADS="$(nproc)"
-          # nproc == 4 on the hosted runner; without dedup t4 was measured twice
-          # and the second cell overwrote the first.
-          THREAD_LIST=$(printf '%s\n' 1 2 4 "$MAX_THREADS" | sort -n -u | tr '\n' ' ')
-          echo "thread counts: $THREAD_LIST"
-          for profile in $PROFILES; do
-            for threads in $THREAD_LIST; do
-              python3 tests/perf/bench.py \
-                --candidate "$RUNNER_TEMP/bin/candidate" \
-                --baseline "$RUNNER_TEMP/bin/baseline" \
-                --corpus "build-perf/corpus/$profile" \
-                --runs "$RUNS" --threads "$threads" \
-                --json "$RUNNER_TEMP/cells/$profile-t$threads.json"
-            done
-          done
+          {
+            echo "| cell | wall-clock cost |"
+            echo "|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          # The thread list is deduplicated by --print-matrix: nproc == 4 on the
+          # hosted runner, and a duplicate cell would overwrite its twin.
+          while read -r mode profile threads runs; do
+            START=$(date +%s)
+            python3 tests/perf/bench.py \
+              --candidate "$RUNNER_TEMP/bin/candidate" \
+              --baseline "$RUNNER_TEMP/bin/baseline" \
+              --corpus "build-perf/corpus/$mode/$profile" \
+              --runs "$runs" --threads "$threads" \
+              --json "$RUNNER_TEMP/cells/$mode-$profile-t$threads.json" < /dev/null
+            echo "| $mode/$profile/t$threads | $(( $(date +%s) - START )) s |" >> "$GITHUB_STEP_SUMMARY"
+          done < "$RUNNER_TEMP/matrix.txt"
 
       - name: render site
         run: |
           set -euo pipefail
-          INIT_FLAG=""
-          if [ ! -s "$RUNNER_TEMP/history-input.jsonl" ]; then
-            INIT_FLAG="--initialize-history"
-          fi
           python3 tools/bench_report.py render \
             --cells-dir "$RUNNER_TEMP/cells" \
-            --history-in "$RUNNER_TEMP/history-input.jsonl" \
             --output-dir "$RUNNER_TEMP/site" \
             --detached-digest-out "$RUNNER_TEMP/manifest.sha256" \
             --baseline-ref "$BASELINE_REF" \
@@ -425,8 +432,7 @@ jobs:
             --runner-cores "${{ steps.meta.outputs.cores }}" \
             --runner-kernel "${{ steps.meta.outputs.kernel }}" \
             --runner-arch "${{ steps.meta.outputs.arch }}" \
-            --runner-compiler "${{ steps.meta.outputs.compiler }}" \
-            $INIT_FLAG
+            --runner-compiler "${{ steps.meta.outputs.compiler }}"
 
       - name: publication eligibility
         id: eligibility
