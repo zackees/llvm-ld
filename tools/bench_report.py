@@ -447,14 +447,23 @@ def link_speed_svg(latest: dict) -> bytes:
                 parts.append(svg_text(x_of(total) + 6, by + 14, label, fill=INK["title"], size=12, weight=bold))
                 if side == "candidate":
                     change = -pair["pdb"]["speedup_percent"]
-                    parts.append(svg_text(x_of(total) + 10 + CHAR_ADVANCE_12PX * len(label), by + 14,
+                    # Bold digits run wider than the plain-text advance.
+                    parts.append(svg_text(x_of(total) + 14 + CHAR_ADVANCE_12PX * 1.1 * len(label), by + 14,
                                           f"{change:+.0f}%", fill=INK["candidate"], size=12, weight="700"))
             if visible:
                 pdb_stock = pair["pdb"]["baseline"]["wall_ms"] - pair["nopdb"]["baseline"]["wall_ms"]
                 pdb_ours = pair["pdb"]["candidate"]["wall_ms"] - pair["nopdb"]["candidate"]["wall_ms"]
+                # The link-only change is reported only when its paired IQR
+                # excludes zero; hosted runners occasionally go bimodal on
+                # short links, and a median then says nothing.
+                nopdb = pair["nopdb"]
+                if nopdb["speedup_percent_q1"] <= 0 <= nopdb["speedup_percent_q3"]:
+                    link_text = "link within noise"
+                else:
+                    link_text = f"link {-nopdb['speedup_percent']:+.0f}%"
                 note = (
                     f"PDB {fmt_time(pdb_stock, seconds)} → {fmt_time(pdb_ours, seconds)} "
-                    f"({100 * (pdb_ours / pdb_stock - 1):+.0f}%) · link {-pair['nopdb']['speedup_percent']:+.0f}%"
+                    f"({100 * (pdb_ours / pdb_stock - 1):+.0f}%) · {link_text}"
                 )
             else:
                 note = "PDB cost within noise" + (": codegen dominates" if MODES[mode]["lto"] else "")

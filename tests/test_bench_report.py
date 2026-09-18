@@ -197,6 +197,19 @@ class BenchReportRenderTest(unittest.TestCase):
             self.assertIn("16 threads (each build type", chart)
 
 
+    def test_link_change_inside_noise_is_not_quoted(self) -> None:
+        cells = full_cells()
+        for cell in cells:
+            if cell["mode"] == "release" and cell["variant"] == "nopdb" and cell["corpus"].endswith("/medium"):
+                cell["speedup_percent"], cell["speedup_percent_q1"], cell["speedup_percent_q3"] = -158.0, -170.0, 65.0
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = pathlib.Path(raw_tmp)
+            self.assertEqual(render(tmp, cells).returncode, 0)
+            chart = (tmp / "site" / "link-speed-overview-dark.svg").read_text(encoding="utf-8")
+            self.assertIn("link within noise", chart)
+            self.assertNotIn("+158%", chart)
+
+
 class BenchReportRejectsTest(unittest.TestCase):
     def assert_render_fails(self, cells: list[dict], message: str) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
