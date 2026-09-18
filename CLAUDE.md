@@ -160,7 +160,9 @@ against itself, and on any miss or mismatch falls back to the old in-job build (
 is 240 minutes so a cold fallback build cannot time out (see #20).
 
 Invariants that must be kept in sync across both workflows: both build Linux with `clang`/
-`clang++` and `-DCMAKE_BUILD_TYPE=Release -DLLVM_APPEND_VC_REV=OFF`; `BASELINE_REF` is declared in
+`clang++` and `-DCMAKE_BUILD_TYPE=Release -DLLVM_APPEND_VC_REV=OFF`; ci.yml's clang/Release/
+`-DLLVM_APPEND_VC_REV=OFF` flags now live in `tools/ci_build.py` (`configure_command`), and
+link-benchmark.yml's fallback build must match them; `BASELINE_REF` is declared in
 both `ci.yml` (the `build-linux` baseline step's env) and `link-benchmark.yml`; and the `FILES`
 derivation from `provenance/payload-prune.json` exists in `ci.yml` and twice in
 `link-benchmark.yml` (download verification and the fallback build) and must stay identical. Drift
@@ -169,10 +171,9 @@ ran. clang was picked over a runner-image default because it matches the compile
 already records and the clang-generated corpora, and because compile caches key on the compiler,
 so one warm sccache serves both workflows.
 
-zccache (PR #18) was closed as superseded: the benchmark no longer compiles in the common path, so
-there is nothing left on that path for a compiler cache to speed up. zccache adoption for `ci.yml`
-is future work tracked under #20; build-tree caching is #21 (blocked on
-`zackees/zccache#1595` and `zackees/soldr#3289`).
+zccache (PR #18) was closed as superseded for the benchmark: `ci.yml`'s `build-linux` now caches
+its build tree with zccache 1.14.0 `snapshot`/`replay` via `tools/ci_build.py` (#21), while compile
+caching stays on sccache.
 
 ### What the numbers mean, and the trap they avoid
 
@@ -215,7 +216,47 @@ but means a corpus cannot be shared between machines by hash.
   This override applies to Windows builds only, so the Linux `llvm-ld-direct` used by
   `tests/perf/bench.py` and the `link-benchmark` workflow runs on glibc malloc.
 
+## CI build script and build-tree cache (#21)
+
+ci.yml's `build-linux` never runs cmake inline; it calls `tools/ci_build.py` (stdlib only) so the
+same code path runs locally. Subcommands:
+
+- `key` — cache keys: primary hashes payload closure, payload-prune.json, CMakeLists.txt,
+  exports.map, cmake/, src/, include/, tools/, tests/ and compiler/cmake/ninja identity plus
+  launcher; restore prefix = platform + launcher + compiler identity + payload closure +
+  payload-prune.json.
+- `replay` — stamps every manifest-listed file fresh, then `zccache replay` restores the recorded
+  mtime only on files whose size and BLAKE3 still match, so unchanged sources look old and any
+  changed source is always newer than its object; reports applied/missing/size_mismatch/modified;
+  a low applied ratio is a `::warning::` not a failure, because it costs time, never correctness;
+  no manifest = cache miss = full build.
+- `build --launcher {auto,zccache,sccache,none}` — configure with the exact CI flags, prints
+  `ninja edges to run: N` from `ninja -n -d explain` before building; `auto` = zccache if on PATH.
+- `snapshot` — `zccache snapshot` excluding build/ by resolved path, manifest at
+  `build/zccache-mtimes.json`.
+- `all` — replay, build, snapshot.
+
+Local usage:
+
+```
+python -m venv ~/.venvs/zccache && ~/.venvs/zccache/bin/pip install zccache==1.14.0   # or: pipx/uv tool install zccache==1.14.0
+PATH=~/.venvs/zccache/bin:$PATH python tools/ci_build.py all        # launcher auto -> zccache
+python -m unittest discover -s tests -p 'test_ci_build.py' -v       # e2e test runs when zccache is on PATH
+```
+
+`ZCCACHE="uvx --from zccache==1.14.0 zccache"` works for replay/snapshot (not as the compiler
+launcher, which needs a real `zccache` on PATH).
+
+Two invariants: (a) CI keeps sccache (GitHub Actions backend) as the compile cache; switching to
+zccache is the one `--launcher` flag in ci.yml; (b) CI snapshots and saves the build tree on push
+to main only, AFTER ctest and BEFORE the baseline-linker step, because that step leaves build/
+holding objects compiled from BASELINE_REF payload files; saving after it would pair HEAD sources
+with baseline objects. The prune step keeps a single build-tree cache so it cannot evict sccache
+from the 10 GB budget.
+
 ## Build
 
 CMake + Ninja on MSVC (VS generator unsupported). `-DCMAKE_{C,CXX}_COMPILER_LAUNCHER=sccache`
 for warm rebuilds. Linux-to-Windows cross via `cmake/WinMsvcCross.cmake` + xwin; see `README.md`.
+On Linux the CI configuration is reproducible locally with `python tools/ci_build.py build` (see
+the section above).
