@@ -33,6 +33,20 @@ def safe_extract(data: bytes, target: pathlib.Path, mode: str = "r:gz") -> list[
         archive.extractall(target, filter="data")
     return names
 
+def write_inventory(path: pathlib.Path, inventory: dict[str, str]) -> None:
+    # Leave an existing inventory byte-for-byte alone when it already records exactly this
+    # path->sha256 mapping: the tracked files were generated with a case-insensitive
+    # (Windows) path order, and re-serialising on Linux would only reorder keys, dirtying the
+    # checkout and changing the build-tree cache key for no content change.
+    if path.exists():
+        try:
+            if json.loads(path.read_text(encoding="utf-8")) == inventory:
+                return
+        except ValueError:
+            pass
+    ordered = dict(sorted(inventory.items(), key=lambda item: (item[0].lower(), item[0])))
+    path.write_text(json.dumps(ordered, indent=2)+"\n", encoding="utf-8")
+
 def import_mimalloc() -> None:
     url=f"https://crates.io/api/v1/crates/mimalloc-pprof/{MI_VERSION}/download"
     data=download(url)
@@ -49,7 +63,7 @@ def import_mimalloc() -> None:
     staging.rmdir()
     inventory={str(p.relative_to(out)).replace("\\", "/"): hashlib.sha256(p.read_bytes()).hexdigest()
                for p in sorted(out.rglob("*")) if p.is_file()}
-    (ROOT/"provenance"/"mimalloc-pprof-files.json").write_text(json.dumps(inventory, indent=2)+"\n")
+    write_inventory(ROOT/"provenance"/"mimalloc-pprof-files.json", inventory)
 
 def import_libxml2() -> None:
     url=f"https://download.gnome.org/sources/libxml2/2.15/libxml2-{XML2_VERSION}.tar.xz"
@@ -67,7 +81,7 @@ def import_libxml2() -> None:
     staging.rmdir()
     inventory={str(p.relative_to(out)).replace("\\", "/"): hashlib.sha256(p.read_bytes()).hexdigest()
                for p in sorted(out.rglob("*")) if p.is_file()}
-    (ROOT/"provenance"/"libxml2-files.json").write_text(json.dumps(inventory, indent=2)+"\n")
+    write_inventory(ROOT/"provenance"/"libxml2-files.json", inventory)
 
 def import_llvm() -> None:
     data=download(f"https://github.com/llvm/llvm-project/archive/{LLVM_COMMIT}.tar.gz")

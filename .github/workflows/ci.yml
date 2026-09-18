@@ -29,6 +29,9 @@ jobs:
           ! grep -E 'LLVM_LD_ENABLE_(PPROF|DHAT):BOOL=ON' build-timing/CMakeCache.txt
   build-linux:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write
     env:
       SCCACHE_GHA_ENABLED: "true"
     steps:
@@ -38,21 +41,44 @@ jobs:
           # commit, which a shallow clone does not contain.
           fetch-depth: 0
       - uses: mozilla-actions/sccache-action@v0.0.11
-      - run: mkdir -p build/.cmake/api/v1/query && touch build/.cmake/api/v1/query/codemodel-v2
-      # LLVM_APPEND_VC_REV=OFF everywhere below: with it ON, LLVM stamps the git revision into the
-      # generated VCSRevision.h, so every commit changes LLVMSupport and therefore llvm_ld.dll -
-      # which defeats byte-identity comparisons across commits and poisons the compiler caches.
-      #
-      # clang, not the image default (gcc on ubuntu-24.04 today): link-benchmark.yml builds and
-      # reports clang (its runner metadata records clang --version and its corpora are clang
-      # output), and it now reuses this job's llvm-ld-direct, so the benchmarked binary must come
-      # from the same compiler and flags. Compile caches key on the compiler binary, so one
-      # compiler also lets link-benchmark's fallback build hit this job's warm sccache instead of
-      # the two workflows competing for the 10 GB cache budget. An explicit compiler also cannot
-      # drift silently when the runner image changes its default. The first clang run of this job
-      # is a one-time cold sccache.
-      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_APPEND_VC_REV=OFF -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace.jsonl
-      - run: cmake --build build --target llvm_ld abi_smoke abi_contract abi_state_test allocator-probe llvm-ld-runner llvm-ld-direct
+      - name: Install zccache (pinned)
+        run: |
+          # Pinned because snapshot/replay first shipped in 1.14.0 (zackees/zccache#1596).
+          # pipx avoids PEP 668 on the image's system Python and does not change the Python
+          # CMake finds.
+          pipx install zccache==1.14.0
+          # Hosted runners already have PIPX_BIN_DIR on PATH; containers (act, self-hosted)
+          # may not, so export it for later steps explicitly.
+          bin_dir="$(pipx environment --value PIPX_BIN_DIR)"
+          echo "$bin_dir" >> "$GITHUB_PATH"
+          "$bin_dir/zccache" --version
+      - name: ci_build.py tests
+        run: python -m unittest discover -s tests -p 'test_ci_build.py' -v
+      - name: Build-tree cache key
+        id: buildtree-key
+        run: python tools/ci_build.py key --launcher sccache --github-output
+      - name: Restore build tree
+        id: buildtree-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: build
+          # Split per issue #21: primary hashes everything that affects the build (payload
+          # closure, payload-prune.json, CMakeLists.txt, exports.map, cmake/, src/, include/,
+          # tools/, tests/, compiler/cmake/ninja identity, launcher), so an exact hit is a
+          # no-op build. restore-keys is the prefix over payload closure + payload-prune.json
+          # + compiler identity, so a PR that edits first-party code restores main's tree and
+          # rebuilds only what changed. Correctness comes from the content-verified replay
+          # below, not from the key.
+          key: ${{ steps.buildtree-key.outputs.primary }}
+          restore-keys: ${{ steps.buildtree-key.outputs.restore-prefix }}
+      - name: Replay content-verified source mtimes
+        run: python tools/ci_build.py replay --import-upstream
+      # Flags (LLVM_APPEND_VC_REV=OFF, clang, Release, the cmake trace used by the closure
+      # audit) now live in tools/ci_build.py configure_command, see its comment; CI keeps
+      # sccache on the GitHub Actions backend for compile caching, and switching to zccache
+      # is changing this one flag.
+      - name: Configure and build
+        run: python tools/ci_build.py build --launcher sccache
       - name: sccache stats
         if: always()
         continue-on-error: true
@@ -72,6 +98,35 @@ jobs:
           printf 'llvm_ld_abi_version\nllvm_ld_allocator_get_info\nllvm_ld_invoke\nllvm_ld_profiler_start\nllvm_ld_profiler_stop\n' > expected-exports.txt
           diff -u expected-exports.txt actual-exports.txt
       - run: ctest --test-dir build --output-on-failure
+      # ORDERING is a correctness requirement: the baseline step below rebuilds llvm-ld-direct
+      # from BASELINE_REF payload files and then restores the HEAD files without rebuilding, so
+      # after it build/ holds objects compiled from baseline content. Saving the tree after that
+      # step together with a manifest recorded before it would let replay stamp HEAD content with
+      # an old mtime next to baseline objects and ship a wrong binary. Snapshot+save must
+      # therefore happen while build/ matches HEAD, i.e. here. The 10 GB repo cache budget also
+      # already holds ~2 GB of sccache, which is why only main saves.
+      - name: Snapshot source mtimes (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: python tools/ci_build.py snapshot
+      - name: Save build tree (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.buildtree-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build
+          key: ${{ steps.buildtree-key.outputs.primary }}
+      # Keeps one build tree (~GBs) so it cannot evict the warm sccache from the 10 GB budget.
+      - name: Prune superseded build-tree caches (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.buildtree-restore.outputs.cache-hit != 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRIMARY: ${{ steps.buildtree-key.outputs.primary }}
+        run: |
+          set -euo pipefail
+          gh cache list --repo "$GITHUB_REPOSITORY" --key llvm-ld-buildtree- --ref refs/heads/main --limit 100 --json id,key --jq '.[] | select(.key != env.PRIMARY) | .id' \
+            | while read -r id; do
+                gh cache delete --repo "$GITHUB_REPOSITORY" "$id"
+              done
       - name: build the link-benchmark baseline linker (main only)
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:

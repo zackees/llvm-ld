@@ -73,11 +73,28 @@ check_c_source_compiles(
 
 # Left undefined on purpose (see comment above): HAVE_DLOPEN, HAVE_LIBHISTORY, HAVE_LIBREADLINE,
 # HAVE_SHLLOAD, XML_SYSCONFDIR, XML_THREAD_LOCAL.
-
-configure_file(
-  "${LLVM_LD_LIBXML2_ROOT}/config.h.cmake.in"
-  "${_llvm_ld_xml2_gen_dir}/config.h"
-  @ONLY)
+#
+# "Undefined" has to be forced, not assumed: these names are not ours alone. LLVM's
+# config-ix.cmake runs check_symbol_exists(dlopen dlfcn.h HAVE_DLOPEN), which caches HAVE_DLOPEN
+# in CMakeCache.txt *after* this file is included. The first configure of a fresh build tree
+# therefore rendered `#undef HAVE_DLOPEN`, and every later configure picked the cached value up
+# and rendered `#define HAVE_DLOPEN 1` instead -- a content change that rewrote config.h and
+# rebuilt every libxml2 object on the second configure of any build tree (including a
+# zccache-restored one, where it defeated tools/ci_build.py's --expect-no-work). Shadow each of
+# them with an empty normal variable, inside a function so the shadowing cannot leak into the
+# directory scope that add_subdirectory(llvm) later inherits (a normal HAVE_DLOPEN there would
+# make LLVM's own check_symbol_exists skip its probe).
+function(_llvm_ld_xml2_configure_config_h)
+  foreach(_llvm_ld_xml2_undef_var
+      HAVE_DLOPEN HAVE_LIBHISTORY HAVE_LIBREADLINE HAVE_SHLLOAD XML_SYSCONFDIR XML_THREAD_LOCAL)
+    set(${_llvm_ld_xml2_undef_var} "")
+  endforeach()
+  configure_file(
+    "${LLVM_LD_LIBXML2_ROOT}/config.h.cmake.in"
+    "${_llvm_ld_xml2_gen_dir}/config.h"
+    @ONLY)
+endfunction()
+_llvm_ld_xml2_configure_config_h()
 
 # --- libxml/xmlversion.h --------------------------------------------------------------------
 # Feature switches: only output, threads and push parsing are compiled in (see the source list
