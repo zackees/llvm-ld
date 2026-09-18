@@ -27,8 +27,14 @@ allocator is glibc malloc on Linux rather than the mimalloc the shipped
 Windows build actually uses, and that the Linux-to-Windows transfer of the
 relative speedup is asserted, not measured.
 
+What is measured is chosen per build mode (Debug + PDB, Release + PDB, Release
+without a PDB as a control, ThinLTO + PDB), defined once in
+tests/perf/gen_corpus.py:MODES and imported here. The site shows only the
+current run: an overview chart comparing the modes and one paired-time chart
+per mode, each in a light and a dark variant.
+
 Subcommands
-  render            build the sealed site from measurement cells + prior history
+  render            build the sealed site from measurement cells
   validate-site     re-check a site directory against the manifest and allowlist
   prepare-branch    stage exactly the site into a linked worktree for commit
   validate-revision prove a committed revision matches the sealed site byte for byte
@@ -42,6 +48,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import html
+import importlib.util
 import json
 import math
 import os
@@ -57,32 +64,61 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, NoReturn
 
-LATEST_SCHEMA = "llvm-ld-link-latest-v1"
-HISTORY_SCHEMA = "llvm-ld-link-history-v1"
-MANIFEST_SCHEMA = "llvm-ld-link-site-manifest-v1"
-STATISTICS_VERSION = "paired-interleaved-median-v1"
+LATEST_SCHEMA = "llvm-ld-link-latest-v2"
+MANIFEST_SCHEMA = "llvm-ld-link-site-manifest-v2"
+STATISTICS_VERSION = "paired-interleaved-median-iqr-v1"
+
+
+def _load_generator() -> Any:
+    """tests/perf/gen_corpus.py owns the build modes and corpus profiles.
+
+    Importing it (rather than mirroring its tables here) keeps one source of
+    truth for what each mode compiles and links; the workflow's measurement
+    loops read the same tables through `gen_corpus.py --print-matrix`.
+    """
+    path = Path(__file__).resolve().parents[1] / "tests" / "perf" / "gen_corpus.py"
+    spec = importlib.util.spec_from_file_location("llvm_ld_gen_corpus", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"{path}: cannot load the corpus generator")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_GENERATOR = _load_generator()
+# Mode ids in publication order (the generator's dict order).
+MODES: dict[str, dict] = _GENERATOR.MODES
+MODE_IDS = tuple(MODES)
 
 # Corpus ids in publication order. The generator profiles live in
 # tests/perf/gen_corpus.py; these are the ones the workflow measures.
 CORPUS_IDS = ("small", "medium", "large")
 CORPUS_LABELS = {
-    "small": "small (64 objects)",
-    "medium": "medium (512 objects)",
-    "large": "large (2048 objects)",
+    corpus: f"{corpus} · {_GENERATOR.PROFILES[corpus]['tus']} objects" for corpus in CORPUS_IDS
 }
 
-THREADS_PANEL = "link-speedup-threads.svg"
-HISTORY_PANEL = "link-speedup-history.svg"
+THEMES = ("light", "dark")
 
-SITE_FILES = {
-    ".nojekyll",
-    "index.html",
-    "latest.json",
-    "history.jsonl",
-    "manifest.json",
-    THREADS_PANEL,
-    HISTORY_PANEL,
-}
+
+def overview_panel_name(theme: str) -> str:
+    return f"link-speed-overview-{theme}.svg"
+
+
+def mode_panel_name(mode: str, theme: str) -> str:
+    return f"link-speed-{mode}-{theme}.svg"
+
+
+SVG_ROLES = {overview_panel_name(theme): f"speed-overview-panel-{theme}" for theme in THEMES}
+SVG_ROLES.update(
+    {
+        mode_panel_name(mode, theme): f"speed-mode-panel-{mode}-{theme}"
+        for mode in MODE_IDS
+        for theme in THEMES
+    }
+)
+SVG_FILES = frozenset(SVG_ROLES)
+
+SITE_FILES = {".nojekyll", "index.html", "latest.json", "manifest.json"} | SVG_FILES
 
 # Byte ceilings, enforced at render and re-enforced at validation. `.nojekyll`
 # must be exactly empty, which the zero cap encodes.
@@ -90,10 +126,8 @@ FILE_CAPS = {
     ".nojekyll": 0,
     "index.html": 2 * 1024 * 1024,
     "latest.json": 32 * 1024 * 1024,
-    "history.jsonl": 32 * 1024 * 1024,
     "manifest.json": 1024 * 1024,
-    THREADS_PANEL: 1024 * 1024,
-    HISTORY_PANEL: 1024 * 1024,
+    **{name: 1024 * 1024 for name in SVG_FILES},
 }
 
 # manifest.json is deliberately absent from both maps below: it describes the
@@ -102,21 +136,16 @@ MEDIA_TYPES = {
     ".nojekyll": "application/octet-stream",
     "index.html": "text/html; charset=utf-8",
     "latest.json": "application/json",
-    "history.jsonl": "application/x-ndjson",
-    THREADS_PANEL: "image/svg+xml",
-    HISTORY_PANEL: "image/svg+xml",
+    **{name: "image/svg+xml" for name in SVG_FILES},
 }
 ROLES = {
     ".nojekyll": "github-pages-marker",
     "index.html": "report-index",
     "latest.json": "validated-latest-data",
-    "history.jsonl": "bounded-compatible-history",
-    THREADS_PANEL: "speedup-by-threads-panel",
-    HISTORY_PANEL: "speedup-history-panel",
+    **SVG_ROLES,
 }
-SVG_FILES = frozenset({THREADS_PANEL, HISTORY_PANEL})
 
-HISTORY_LIMIT = 1000
+MIN_RUNS = 4
 HEX_64 = re.compile(r"\A[0-9a-f]{64}\Z")
 
 
@@ -169,42 +198,48 @@ def git_command(repository: Path, *args: str) -> bytes:
 
 # ------------------------------------------------------------ SVG rendering
 #
-# Hand-written SVG, one dark theme, fixed pixel layout. The panels are
-# hotlinked into the README from the raw data-branch URL, so they must carry no
-# script, no external reference and no event handler; validate_svg enforces it.
+# Hand-written SVG, fixed pixel layout, one light and one dark variant of every
+# panel. The README embeds them with <picture>/prefers-color-scheme, which is
+# GitHub's documented mechanism; a media query inside an <img>-embedded SVG is
+# not reliable across browsers. The panels are hotlinked from the raw
+# data-branch URL, so they must carry no script, no external reference and no
+# event handler; validate_svg enforces it.
+#
+# Every bar is directly labelled: a hotlinked SVG has no hover layer, so the
+# labels are the only value channel in the README. The dashboard table is the
+# accessible twin.
 
-INK = {
-    "background": "#0d1117",
-    "plot": "#111823",
-    "grid": "#1f2937",
-    "zero": "#30363d",
-    "axis": "#8b98ad",
-    "title": "#e8eef7",
-    "muted": "#7d8da5",
-}
-# One fixed color per corpus, keyed by id so a corpus is the same color on
-# every panel.
-SERIES = {
-    "small": "#e3b341",
-    "medium": "#3fb950",
-    "large": "#58a6ff",
+PALETTES = {
+    "light": {
+        "background": "#ffffff",
+        "plot": "#f6f8fa",
+        "grid": "#d0d7de",
+        "title": "#1f2328",
+        "muted": "#59636e",
+        "baseline": "#7a7a76",
+        "candidate": "#2a78d6",
+        "ramp": ("#86b6ef", "#3987e5", "#1c5cab"),
+    },
+    "dark": {
+        "background": "#0d1117",
+        "plot": "#161b22",
+        "grid": "#30363d",
+        "title": "#e6edf3",
+        "muted": "#8b949e",
+        "baseline": "#6e7681",
+        "candidate": "#3987e5",
+        "ramp": ("#9ec5f4", "#5598e7", "#256abf"),
+    },
 }
 
 FONT_STACK = "system-ui,-apple-system,Segoe UI,Roboto,sans-serif"
 # Approximate advance per character at 12px for the manual legend flow. The
 # only text-metric assumption in the file; keep labels short.
-LEGEND_ADVANCE = 7.4
+CHAR_ADVANCE_12PX = 6.9
 
 WIDTH = 1000
-HEIGHT = 600
-PLOT_TOP = 118
-PLOT_LEFT = 92
-PLOT_RIGHT = 40
-# Deep enough for four stacked rows below the plot: tick labels (+26), the axis
-# title (+48), the legend (height-54) and the provenance footer (height-22).
-# With three corpora the legend runs ~530px wide, so it must not share a row
-# with the centred axis title.
-PLOT_BOTTOM = 140
+OVERVIEW_HEIGHT = 560
+MODE_HEIGHT = 460
 
 
 def svg_text(
@@ -236,18 +271,12 @@ def nice_ceiling(peak: float) -> float:
     return float(magnitude * 10)
 
 
-def y_of(value: float, floor: float, ceiling: float, top: float, height: float) -> float:
-    span = ceiling - floor
-    if span <= 0:
-        return top + height
-    return top + height - (value - floor) / span * height
-
-
-def svg_open(width: int, height: int) -> list[str]:
+def svg_open(width: int, height: int, title: str, ink: dict) -> list[str]:
     return [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
         f'width="{width}" height="{height}" role="img">',
-        f'<rect width="{width}" height="{height}" fill="{INK["background"]}"/>',
+        f"<title>{escaped(title)}</title>",
+        f'<rect width="{width}" height="{height}" fill="{ink["background"]}"/>',
     ]
 
 
@@ -256,286 +285,325 @@ def svg_close(parts: list[str]) -> bytes:
     return ("\n".join(parts) + "\n").encode("utf-8")
 
 
-def draw_frame(
-    parts: list[str],
-    *,
-    title: str,
-    subtitle: str,
-    left: float,
-    top: float,
-    plot_width: float,
-    plot_height: float,
-    floor: float,
-    ceiling: float,
-    y_label: str,
-) -> None:
-    """Plot background, horizontal gridlines with value labels, and titles."""
-    parts.append(
-        f'<rect x="{left}" y="{top}" width="{plot_width}" height="{plot_height}" '
-        f'fill="{INK["plot"]}" rx="6"/>'
-    )
-    parts.append(svg_text(left - 12, top - 46, title, fill=INK["title"], size=20, weight="600"))
-    parts.append(svg_text(left - 12, top - 24, subtitle, fill=INK["muted"], size=13))
-    for step in range(5):
-        value = floor + (ceiling - floor) * step / 4
-        y = y_of(value, floor, ceiling, top, plot_height)
-        parts.append(
-            f'<line x1="{left}" y1="{y:.1f}" x2="{left + plot_width:.1f}" y2="{y:.1f}" '
-            f'stroke="{INK["grid"]}" stroke-width="1"/>'
-        )
-        parts.append(
-            svg_text(left - 12, y + 4, f"{value:g}", fill=INK["axis"], size=12, anchor="end")
-        )
-    # A zero rule, when the axis spans it, so a regression reads instantly.
-    if floor < 0 < ceiling:
-        zero = y_of(0.0, floor, ceiling, top, plot_height)
-        parts.append(
-            f'<line x1="{left}" y1="{zero:.1f}" x2="{left + plot_width:.1f}" y2="{zero:.1f}" '
-            f'stroke="{INK["zero"]}" stroke-width="2"/>'
-        )
-    parts.append(
-        svg_text(left - 12, top - 4, y_label, fill=INK["muted"], size=11, anchor="end")
-    )
+def fmt_percent(value: float) -> str:
+    """`+43%`, or one decimal for small values so a control row does not read as a flat 0."""
+    if abs(value) < 10:
+        return f"{value:+.1f}%"
+    return f"{value:+.0f}%"
 
 
-def draw_series(
-    parts: list[str],
-    points: list[tuple[float, float]],
-    color: str,
-    *,
-    floor: float,
-    ceiling: float,
-    top: float,
-    plot_height: float,
-) -> None:
-    if not points:
+def fmt_ms(value: float) -> str:
+    """Compact enough to sit over a 22px bar: `656`, `1163`, `12.1s`."""
+    if value >= 10000:
+        return f"{value / 1000:.1f}s"
+    if value >= 100:
+        return f"{value:.0f}"
+    return f"{value:.1f}"
+
+
+def fmt_axis_ms(value: float) -> str:
+    if value == 0:
+        return "0"
+    if value >= 10000:
+        return f"{value / 1000:g} s"
+    return f"{value:,.0f} ms" if value >= 10 else f"{value:g} ms"
+
+
+def draw_bar(parts: list[str], x: float, y_zero: float, y_end: float, width: float, color: str) -> None:
+    """A bar from the zero line to y_end, rounded (4px) at the data end only."""
+    height = abs(y_end - y_zero)
+    if height < 0.5:
+        parts.append(
+            f'<rect x="{x:.1f}" y="{y_zero - 0.5:.1f}" width="{width:.1f}" height="1" fill="{color}"/>'
+        )
         return
-    path = " ".join(
-        f"{'M' if index == 0 else 'L'}{x:.1f} "
-        f"{y_of(value, floor, ceiling, top, plot_height):.1f}"
-        for index, (x, value) in enumerate(points)
-    )
+    radius = min(4.0, height, width / 2)
+    right = x + width
+    if y_end < y_zero:  # grows up
+        path = (
+            f"M{x:.1f} {y_zero:.1f}V{y_end + radius:.1f}"
+            f"Q{x:.1f} {y_end:.1f} {x + radius:.1f} {y_end:.1f}"
+            f"H{right - radius:.1f}Q{right:.1f} {y_end:.1f} {right:.1f} {y_end + radius:.1f}"
+            f"V{y_zero:.1f}Z"
+        )
+    else:  # hangs below the zero line
+        path = (
+            f"M{x:.1f} {y_zero:.1f}V{y_end - radius:.1f}"
+            f"Q{x:.1f} {y_end:.1f} {x + radius:.1f} {y_end:.1f}"
+            f"H{right - radius:.1f}Q{right:.1f} {y_end:.1f} {right:.1f} {y_end - radius:.1f}"
+            f"V{y_zero:.1f}Z"
+        )
+    parts.append(f'<path d="{path}" fill="{color}"/>')
+
+
+def draw_whisker(parts: list[str], x: float, y_low: float, y_high: float, color: str) -> None:
+    """Interquartile range: a 1px stem with 4px caps."""
+    top, bottom = min(y_low, y_high), max(y_low, y_high)
     parts.append(
-        f'<path d="{path}" fill="none" stroke="{color}" stroke-width="2.5" '
-        'stroke-linejoin="round" stroke-linecap="round"/>'
+        f'<path d="M{x:.1f} {top:.1f}V{bottom:.1f}M{x - 4:.1f} {top:.1f}H{x + 4:.1f}'
+        f'M{x - 4:.1f} {bottom:.1f}H{x + 4:.1f}" stroke="{color}" stroke-width="1" fill="none"/>'
     )
-    for x, value in points:
-        # Marker filled with the page background so the line reads through it.
+
+
+def draw_legend(
+    parts: list[str], items: list[tuple[str, str]], x: float, y: float, ink: dict
+) -> float:
+    """Swatches with labels in a row; returns the x after the last item."""
+    cursor = x
+    for label, color in items:
         parts.append(
-            f'<circle cx="{x:.1f}" cy="{y_of(value, floor, ceiling, top, plot_height):.1f}" '
-            f'r="4.5" fill="{INK["background"]}" stroke="{color}" stroke-width="2.5"/>'
+            f'<rect x="{cursor:.1f}" y="{y - 10:.1f}" width="12" height="12" rx="2" fill="{color}"/>'
         )
+        parts.append(svg_text(cursor + 18, y, label, fill=ink["title"], size=12))
+        cursor += 18 + CHAR_ADVANCE_12PX * len(label) + 22
+    return cursor
 
 
-def draw_legend(parts: list[str], labels: list[tuple[str, str]], height: int) -> None:
-    cursor = float(PLOT_LEFT)
-    for label, color in labels:
-        parts.append(
-            f'<rect x="{cursor:.1f}" y="{height - 54}" width="22" height="4" rx="2" '
-            f'fill="{color}"/>'
-        )
-        parts.append(svg_text(cursor + 30, height - 47, label, fill=INK["axis"], size=12))
-        cursor += 34 + LEGEND_ADVANCE * len(label)
+def provenance_line(latest: dict) -> str:
+    runner = latest["runner"]
+    cores = f", {runner['cores']} cores" if runner["cores"] else ""
+    return (
+        f"run {latest['run']['run_id']} · source {latest['run']['source_sha'][:12]} · "
+        f"{runner['cpu'] or 'unknown CPU'}{cores} · Linux, glibc malloc"
+    )
 
 
-def footer(parts: list[str], text: str, height: int) -> None:
-    parts.append(svg_text(PLOT_LEFT, height - 22, text, fill=INK["muted"], size=11))
+def peak_threads_of(cells: list[dict]) -> int:
+    return max(int(cell["threads"]) for cell in cells)
 
 
-def threads_panel_svg(latest: dict) -> bytes:
-    """Speedup versus thread count, one line per corpus.
+def mode_flags_text(mode: str) -> str:
+    spec = MODES[mode]
+    return f"objects: clang {' '.join(spec['cflags'])} · link: {' '.join(spec['link_flags'])}"
 
-    x is log2-spaced because the thread points are powers of two.
+
+def overview_panel_svg(latest: dict, theme: str) -> bytes:
+    """% less wall time per build mode at the highest measured thread count.
+
+    One group per mode, one bar per corpus (ordinal ramp small -> large), each
+    labelled with the percent and the paired times it came from.
     """
+    ink = PALETTES[theme]
     cells = latest["cells"]
-    thread_points = sorted({int(cell["threads"]) for cell in cells})
-    parts = svg_open(WIDTH, HEIGHT)
-    plot_width = WIDTH - PLOT_LEFT - PLOT_RIGHT
-    plot_height = HEIGHT - PLOT_TOP - PLOT_BOTTOM
+    peak = peak_threads_of(cells)
+    title = "Link time saved by llvm-ld, by build mode"
+    parts = svg_open(WIDTH, OVERVIEW_HEIGHT, title, ink)
+    left, right, top, bottom = 84.0, 24.0, 118.0, 400.0
+    plot_width = WIDTH - left - right
+    plot_height = bottom - top
 
-    values = [float(cell["speedup_percent"]) for cell in cells]
-    peak = max(values + [0.0])
+    # One bar per (mode, corpus): the cell at that mode's highest thread count.
+    chosen: dict[str, list[dict]] = {}
+    for mode in MODE_IDS:
+        mode_cells = [cell for cell in cells if cell["mode"] == mode]
+        top_threads = peak_threads_of(mode_cells)
+        chosen[mode] = [cell for cell in mode_cells if int(cell["threads"]) == top_threads]
+    values = [
+        value
+        for group in chosen.values()
+        for cell in group
+        for value in (cell["speedup_percent"], cell["speedup_percent_q1"], cell["speedup_percent_q3"])
+    ]
+    # Ticks on one readable step; room above the tallest bar for its two label lines.
+    step = nice_ceiling(max(max(values + [0.0]) * 1.25, 4.0) / 4)
+    ceiling = step * max(1, math.ceil(max(values + [0.0]) * 1.25 / step))
     trough = min(values + [0.0])
-    ceiling = nice_ceiling(peak * 1.12)
-    floor = 0.0 if trough >= 0 else -nice_ceiling(abs(trough) * 1.2)
+    floor = -step * math.ceil(-trough / step) if trough < 0 else 0.0
 
-    draw_frame(
-        parts,
-        title="Link speedup after the PDB-emission work",
-        subtitle=(
-            "paired against the payload before the patches, same runner, "
-            "byte-identical EXE and PDB"
-        ),
-        left=PLOT_LEFT,
-        top=PLOT_TOP,
-        plot_width=plot_width,
-        plot_height=plot_height,
-        floor=floor,
-        ceiling=ceiling,
-        y_label="% faster",
-    )
+    def y_of(value: float) -> float:
+        return top + (ceiling - value) / (ceiling - floor) * plot_height
 
-    def x_of(threads: int) -> float:
-        if len(thread_points) < 2:
-            return PLOT_LEFT + plot_width / 2
-        lo = math.log2(thread_points[0])
-        hi = math.log2(thread_points[-1])
-        return PLOT_LEFT + (math.log2(threads) - lo) / (hi - lo) * plot_width
-
-    for threads in thread_points:
-        x = x_of(threads)
-        parts.append(
-            f'<line x1="{x:.1f}" y1="{PLOT_TOP}" x2="{x:.1f}" '
-            f'y2="{PLOT_TOP + plot_height}" stroke="{INK["grid"]}" stroke-width="1"/>'
-        )
-        label = "max" if threads == thread_points[-1] and threads > 8 else str(threads)
-        parts.append(
-            svg_text(
-                x,
-                PLOT_TOP + plot_height + 26,
-                label,
-                fill=INK["title"],
-                size=13,
-                weight="600",
-                anchor="middle",
-            )
-        )
+    parts.append(svg_text(left - 36, 40, title, fill=ink["title"], size=20, weight="600"))
     parts.append(
         svg_text(
-            PLOT_LEFT + plot_width / 2,
-            PLOT_TOP + plot_height + 48,
-            "linker threads (/threads:)",
-            fill=INK["muted"],
-            size=12,
-            anchor="middle",
+            left - 36,
+            62,
+            "vs. stock lld-link: the LLVM 23.1.0 payload before the patches · same runner, "
+            "interleaved · byte-identical output",
+            fill=ink["muted"],
+            size=13,
         )
     )
+    parts.append(
+        svg_text(
+            left - 36,
+            80,
+            f"paired median at {peak} threads (each mode's highest measured) · "
+            "whiskers = interquartile range · higher is better",
+            fill=ink["muted"],
+            size=13,
+        )
+    )
+    parts.append(
+        f'<rect x="{left:.1f}" y="{top:.1f}" width="{plot_width:.1f}" height="{plot_height:.1f}" '
+        f'fill="{ink["plot"]}" rx="6"/>'
+    )
+    for tick in range(round((ceiling - floor) / step) + 1):
+        value = floor + step * tick
+        y = y_of(value)
+        parts.append(
+            f'<line x1="{left:.1f}" y1="{y:.1f}" x2="{left + plot_width:.1f}" y2="{y:.1f}" '
+            f'stroke="{ink["grid"]}" stroke-width="1"/>'
+        )
+        parts.append(svg_text(left - 10, y + 4, f"{value:g}%", fill=ink["muted"], size=12, anchor="end"))
+    zero = y_of(0.0)
+    parts.append(
+        f'<line x1="{left:.1f}" y1="{zero:.1f}" x2="{left + plot_width:.1f}" y2="{zero:.1f}" '
+        f'stroke="{ink["muted"]}" stroke-width="1"/>'
+    )
+    parts.append(svg_text(left, top - 10, "% less wall time (paired median)", fill=ink["muted"], size=11))
 
-    legend: list[tuple[str, str]] = []
-    for corpus in CORPUS_IDS:
-        points = sorted(
-            (x_of(int(cell["threads"])), float(cell["speedup_percent"]))
-            for cell in cells
-            if cell["corpus"] == corpus
+    group_width = plot_width / len(MODE_IDS)
+    slot = 76.0
+    bar_width = 24.0
+    for index, mode in enumerate(MODE_IDS):
+        centre = left + group_width * (index + 0.5)
+        group = sorted(chosen[mode], key=lambda cell: CORPUS_IDS.index(cell["corpus"]))
+        start = centre - slot * len(group) / 2
+        for position, cell in enumerate(group):
+            x_centre = start + slot * (position + 0.5)
+            color = ink["ramp"][CORPUS_IDS.index(cell["corpus"])]
+            value = cell["speedup_percent"]
+            draw_bar(parts, x_centre - bar_width / 2, zero, y_of(value), bar_width, color)
+            y_low, y_high = y_of(cell["speedup_percent_q1"]), y_of(cell["speedup_percent_q3"])
+            draw_whisker(parts, x_centre, y_low, y_high, ink["muted"])
+            pair = f"{fmt_ms(cell['baseline']['wall_ms'])}→{fmt_ms(cell['candidate']['wall_ms'])} ms"
+            # Labels always sit above the bar, its whisker and the zero line, so a
+            # negative (hanging) bar never pushes them into the group labels.
+            label_top = min(y_of(value), y_high, y_low, zero) - 20
+            parts.append(svg_text(x_centre, label_top, fmt_percent(value), fill=ink["title"], size=13, weight="700", anchor="middle"))
+            parts.append(svg_text(x_centre, label_top + 14, pair, fill=ink["muted"], size=11, anchor="middle"))
+        parts.append(svg_text(centre, bottom + 24, MODES[mode]["label"], fill=ink["title"], size=13, weight="700", anchor="middle"))
+        spec = MODES[mode]
+        parts.append(
+            svg_text(centre, bottom + 40, " ".join(spec["cflags"]), fill=ink["muted"], size=11, anchor="middle")
         )
-        if not points:
-            continue
-        draw_series(
-            parts,
-            points,
-            SERIES[corpus],
-            floor=floor,
-            ceiling=ceiling,
-            top=PLOT_TOP,
-            plot_height=plot_height,
+        parts.append(
+            svg_text(centre, bottom + 54, " ".join(spec["link_flags"]), fill=ink["muted"], size=11, anchor="middle")
         )
-        legend.append((CORPUS_LABELS[corpus], SERIES[corpus]))
-    draw_legend(parts, legend, HEIGHT)
-    footer(
+        missing = [corpus for corpus in CORPUS_IDS if corpus not in {cell["corpus"] for cell in group}]
+        if missing:
+            parts.append(
+                svg_text(centre, bottom + 70, f"{', '.join(missing)} not measured", fill=ink["muted"], size=11, anchor="middle")
+            )
+        elif not spec["pdb"]:
+            parts.append(svg_text(centre, bottom + 70, "control: no PDB, expect ~0%", fill=ink["muted"], size=11, anchor="middle"))
+
+    draw_legend(
         parts,
-        f"run {latest['run']['run_id']} - source {latest['run']['source_sha'][:12]} - "
-        f"{latest['runner']['cpu']} - Linux, glibc malloc - higher is better",
-        HEIGHT,
+        [(CORPUS_LABELS[corpus], ink["ramp"][i]) for i, corpus in enumerate(CORPUS_IDS)],
+        left - 36,
+        OVERVIEW_HEIGHT - 44,
+        ink,
     )
+    parts.append(svg_text(left - 36, OVERVIEW_HEIGHT - 18, provenance_line(latest), fill=ink["muted"], size=11))
     return svg_close(parts)
 
 
-def history_panel_svg(rows: list[dict], comparison_key: str) -> bytes:
-    """Speedup at the highest measured thread count over time, per corpus.
+def mode_panel_svg(latest: dict, mode: str, theme: str) -> bytes:
+    """Paired link time (stock lld vs llvm-ld) per corpus facet and thread count."""
+    ink = PALETTES[theme]
+    spec = MODES[mode]
+    cells = [cell for cell in latest["cells"] if cell["mode"] == mode]
+    title = spec["label"]
+    parts = svg_open(WIDTH, MODE_HEIGHT, f"{title}: link time, stock lld-link vs llvm-ld", ink)
+    parts.append(svg_text(24, 36, title, fill=ink["title"], size=20, weight="600"))
+    parts.append(svg_text(24, 58, mode_flags_text(mode), fill=ink["title"], size=12))
+    parts.append(svg_text(24, 76, spec["note"], fill=ink["muted"], size=12))
 
-    Only rows sharing the current comparison key are connected: a different
-    baseline or corpus set is a different experiment, not a later data point.
-    """
-    compatible = [row for row in rows if row.get("comparison_key") == comparison_key]
-    parts = svg_open(WIDTH, HEIGHT)
-    plot_width = WIDTH - PLOT_LEFT - PLOT_RIGHT
-    plot_height = HEIGHT - PLOT_TOP - PLOT_BOTTOM
-
-    series: dict[str, list[tuple[float, float]]] = {}
-    for index, row in enumerate(compatible):
-        for corpus, value in sorted(row.get("peak_speedup_percent", {}).items()):
-            series.setdefault(corpus, []).append((float(index), float(value)))
-
-    values = [value for points in series.values() for _, value in points]
-    peak_value = max(values + [0.0])
-    trough = min(values + [0.0])
-    ceiling = nice_ceiling(peak_value * 1.12) if values else 10.0
-    floor = 0.0 if trough >= 0 else -nice_ceiling(abs(trough) * 1.2)
-
-    peak = None
-    if compatible and "peak_threads" in compatible[-1]:
-        peak = int(compatible[-1]["peak_threads"])
-    if peak is not None:
-        subtitle = (
-            f"{len(compatible)} run(s) sharing one baseline and corpus set; "
-            f"at {peak} threads, the highest measured (capped by runner cores)"
-        )
-    else:
-        subtitle = (
-            f"{len(compatible)} run(s) sharing one baseline and corpus set; "
-            "at the highest measured thread count"
-        )
-
-    draw_frame(
-        parts,
-        title="Link speedup over time",
-        subtitle=subtitle,
-        left=PLOT_LEFT,
-        top=PLOT_TOP,
-        plot_width=plot_width,
-        plot_height=plot_height,
-        floor=floor,
-        ceiling=ceiling,
-        y_label="% faster",
-    )
-
-    span = max(len(compatible) - 1, 1)
-
-    def x_of(index: float) -> float:
-        # A lone run would otherwise pin to the left edge and read like a
-        # truncated series; centre it until there is a second point.
-        if len(compatible) == 1:
-            return PLOT_LEFT + plot_width / 2
-        return PLOT_LEFT + index / span * plot_width
-
-    legend: list[tuple[str, str]] = []
-    for corpus in CORPUS_IDS:
-        points = [(x_of(index), value) for index, value in series.get(corpus, [])]
-        if not points:
-            continue
-        draw_series(
-            parts,
-            points,
-            SERIES[corpus],
-            floor=floor,
-            ceiling=ceiling,
-            top=PLOT_TOP,
-            plot_height=plot_height,
-        )
-        legend.append((CORPUS_LABELS[corpus], SERIES[corpus]))
-    draw_legend(parts, legend, HEIGHT)
-
-    if compatible:
-        first = compatible[0]["run"]["generated_at_utc"][:10]
-        last = compatible[-1]["run"]["generated_at_utc"][:10]
+    facet_top, facet_bottom = 132.0, 330.0
+    facet_gap = 18.0
+    outer_left, outer_right = 24.0, 24.0
+    facet_width = (WIDTH - outer_left - outer_right - 2 * facet_gap) / 3
+    bar_width, bar_gap = 22.0, 8.0
+    for index, corpus in enumerate(CORPUS_IDS):
+        fx = outer_left + index * (facet_width + facet_gap)
+        axis_left = fx + 58
+        plot_width = fx + facet_width - axis_left
+        plot_height = facet_bottom - facet_top
+        parts.append(svg_text(fx, facet_top - 18, CORPUS_LABELS[corpus], fill=ink["title"], size=13, weight="700"))
         parts.append(
-            svg_text(PLOT_LEFT, PLOT_TOP + plot_height + 26, first, fill=INK["axis"], size=12)
+            f'<rect x="{axis_left:.1f}" y="{facet_top:.1f}" width="{plot_width:.1f}" '
+            f'height="{plot_height:.1f}" fill="{ink["plot"]}" rx="6"/>'
         )
+        facet_cells = sorted(
+            (cell for cell in cells if cell["corpus"] == corpus), key=lambda cell: int(cell["threads"])
+        )
+        if not facet_cells:
+            parts.append(
+                svg_text(
+                    axis_left + plot_width / 2,
+                    facet_top + plot_height / 2,
+                    "not measured" + (": ThinLTO codegen" if spec["lto"] else ""),
+                    fill=ink["muted"],
+                    size=12,
+                    anchor="middle",
+                )
+            )
+            continue
+        peak_ms = max(
+            max(cell["baseline"]["wall_ms_q3"], cell["candidate"]["wall_ms_q3"], cell["baseline"]["wall_ms"])
+            for cell in facet_cells
+        )
+        ceiling = nice_ceiling(peak_ms * 1.25)
+
+        def y_of(value: float, ceiling: float = ceiling) -> float:
+            return facet_bottom - value / ceiling * plot_height
+
+        for step in range(3):
+            value = ceiling * step / 2
+            y = y_of(value)
+            parts.append(
+                f'<line x1="{axis_left:.1f}" y1="{y:.1f}" x2="{axis_left + plot_width:.1f}" '
+                f'y2="{y:.1f}" stroke="{ink["grid"]}" stroke-width="1"/>'
+            )
+            parts.append(svg_text(axis_left - 6, y + 4, fmt_axis_ms(value), fill=ink["muted"], size=11, anchor="end"))
+        slot = plot_width / len(facet_cells)
+        for position, cell in enumerate(facet_cells):
+            centre = axis_left + slot * (position + 0.5)
+            label_tops = []
+            for side, offset in (("baseline", -(bar_gap + bar_width) / 2), ("candidate", (bar_gap + bar_width) / 2)):
+                data = cell[side]
+                x_centre = centre + offset
+                color = ink["baseline"] if side == "baseline" else ink["candidate"]
+                draw_bar(parts, x_centre - bar_width / 2, facet_bottom, y_of(data["wall_ms"]), bar_width, color)
+                draw_whisker(parts, x_centre, y_of(data["wall_ms_q1"]), y_of(data["wall_ms_q3"]), ink["muted"])
+                label_y = min(y_of(data["wall_ms"]), y_of(data["wall_ms_q3"])) - 6
+                label_tops.append(label_y)
+                parts.append(svg_text(x_centre, label_y, fmt_ms(data["wall_ms"]), fill=ink["muted"], size=11, anchor="middle"))
+            parts.append(
+                svg_text(centre, min(label_tops) - 16, fmt_percent(cell["speedup_percent"]), fill=ink["title"], size=13, weight="700", anchor="middle")
+            )
+            threads = int(cell["threads"])
+            parts.append(
+                svg_text(centre, facet_bottom + 18, f"{threads} thread{'s' if threads != 1 else ''}", fill=ink["muted"], size=11, anchor="middle")
+            )
+        top_cell = facet_cells[-1]
         parts.append(
             svg_text(
-                PLOT_LEFT + plot_width,
-                PLOT_TOP + plot_height + 26,
-                last,
-                fill=INK["axis"],
-                size=12,
-                anchor="end",
+                axis_left + plot_width / 2,
+                facet_bottom + 38,
+                f"at {int(top_cell['threads'])} threads: CPU {top_cell['cpu_delta_percent']:+.0f}% · "
+                f"peak RSS {top_cell['rss_delta_percent']:+.1f}%",
+                fill=ink["muted"],
+                size=11,
+                anchor="middle",
             )
         )
-    footer(
+
+    runs = sorted({int(cell["runs"]) for cell in cells})
+    runs_text = "/".join(str(value) for value in runs)
+    end = draw_legend(
         parts,
-        "one point per published run - highest measured thread count - higher is better",
-        HEIGHT,
+        [("stock lld-link (LLVM 23.1.0, before the patches)", ink["baseline"]), ("llvm-ld", ink["candidate"])],
+        outer_left,
+        MODE_HEIGHT - 50,
+        ink,
     )
+    parts.append(
+        svg_text(end, MODE_HEIGHT - 50, f"n = {runs_text} paired links per bar, medians; whiskers = interquartile range", fill=ink["muted"], size=11)
+    )
+    parts.append(svg_text(outer_left, MODE_HEIGHT - 22, provenance_line(latest) + " · shorter is better", fill=ink["muted"], size=11))
     return svg_close(parts)
 
 
@@ -573,6 +641,9 @@ def validate_html_links(path: Path, site: Path) -> None:
             fail(f"{path}: every <img> needs non-empty alt text: {tag}")
 
     loading: list[str] = re.findall(r"\bsrc=[\"']([^\"']+)[\"']", source, re.IGNORECASE)
+    # <picture><source srcset=...>: every candidate URL is a load, descriptors ("2x") are not.
+    for srcset in re.findall(r"\bsrcset=[\"']([^\"']+)[\"']", source, re.IGNORECASE):
+        loading += [entry.split()[0] for entry in srcset.split(",") if entry.strip()]
     loading += re.findall(r"<link\b[^>]*\bhref=[\"']([^\"']+)[\"']", source, re.IGNORECASE)
     for reference in loading:
         if re.match(r"\A[a-z]+:", reference, re.IGNORECASE) or reference.startswith("//"):
@@ -664,12 +735,9 @@ def validate_site(site: Path, detached: Path | None = None) -> None:
     latest = json.loads((site / "latest.json").read_text(encoding="utf-8"))
     if latest.get("schema_version") != LATEST_SCHEMA:
         fail("latest.json: unexpected schema_version")
-    rows = read_history_text((site / "history.jsonl").read_text(encoding="utf-8"), site)
-    if len(rows) > HISTORY_LIMIT:
-        fail(f"history.jsonl: history exceeds {HISTORY_LIMIT} rows")
-    if rows != sorted(rows, key=history_sort_key):
-        fail("history.jsonl: rows are not in canonical sort order")
-    reject_duplicate_history(rows)
+    for cell in latest.get("cells", []):
+        if cell.get("mode") not in MODES:
+            fail(f"latest.json: cell has unknown build mode {cell.get('mode')!r}")
 
     if detached is not None:
         expected = detached.read_text(encoding="ascii").strip()
@@ -677,89 +745,6 @@ def validate_site(site: Path, detached: Path | None = None) -> None:
             fail(f"{detached}: expected a sha256 hex digest")
         if expected != sha256_file(site / "manifest.json"):
             fail(f"{detached}: detached digest does not match manifest.json")
-
-
-# ------------------------------------------------------------------ history
-
-
-def history_sort_key(row: dict) -> tuple:
-    run = row["run"]
-    return (run["generated_at_utc"], str(run["run_id"]), int(run["run_attempt"]))
-
-
-def reject_duplicate_history(rows: list[dict]) -> None:
-    seen = set()
-    for row in rows:
-        run = row["run"]
-        identity = (str(run["run_id"]), int(run["run_attempt"]))
-        if identity in seen:
-            fail(f"history: duplicate run {identity}")
-        seen.add(identity)
-
-
-def read_history_text(text: str, where: Path) -> list[dict]:
-    rows = []
-    if text and not text.endswith("\n"):
-        fail(f"{where}: history must end with a newline")
-    for number, line in enumerate(text.splitlines(), start=1):
-        if not line.strip():
-            fail(f"{where}: blank line at {number}")
-        row = json.loads(line)
-        if row.get("history_schema_version") != HISTORY_SCHEMA:
-            fail(f"{where}: unexpected history_schema_version at line {number}")
-        rows.append(row)
-    return rows
-
-
-def read_history(path: Path, initialize: bool) -> list[dict]:
-    if not path.exists() or path.stat().st_size == 0:
-        if not initialize:
-            fail(f"{path}: history is absent; pass --initialize-history explicitly")
-        return []
-    return read_history_text(path.read_text(encoding="utf-8"), path)
-
-
-def history_row(latest: dict) -> dict:
-    """Compact projection of latest.json: enough to plot, nothing bulky."""
-    peak_threads = max(int(cell["threads"]) for cell in latest["cells"])
-    peak: dict[str, float] = {}
-    for cell in latest["cells"]:
-        if int(cell["threads"]) == peak_threads:
-            peak[cell["corpus"]] = float(cell["speedup_percent"])
-    return {
-        "history_schema_version": HISTORY_SCHEMA,
-        "statistics_version": STATISTICS_VERSION,
-        "comparison_key": latest["comparison_key"],
-        "run": latest["run"],
-        "runner_fingerprint_sha256": latest["runner"]["fingerprint_sha256"],
-        "peak_threads": peak_threads,
-        "peak_speedup_percent": peak,
-        "cells": [
-            {
-                "corpus": cell["corpus"],
-                "threads": int(cell["threads"]),
-                "speedup_percent": float(cell["speedup_percent"]),
-                "cpu_delta_percent": float(cell["cpu_delta_percent"]),
-                "rss_delta_percent": float(cell["rss_delta_percent"]),
-            }
-            for cell in latest["cells"]
-        ],
-    }
-
-
-def merge_history(rows: list[dict], current: dict) -> list[dict]:
-    combined = list(rows)
-    run = current["run"]
-    identity = (str(run["run_id"]), int(run["run_attempt"]))
-    for row in combined:
-        existing = row["run"]
-        if (str(existing["run_id"]), int(existing["run_attempt"])) == identity:
-            fail(f"history append: run {identity} is already published")
-    combined.append(current)
-    reject_duplicate_history(combined)
-    combined.sort(key=history_sort_key)
-    # Rolling window: the branch is a publication surface, not an archive.
-    return combined[-HISTORY_LIMIT:]
 
 
 # ------------------------------------------------------------------- render
@@ -770,14 +755,34 @@ def runner_fingerprint(runner: dict) -> str:
 
 
 def comparison_key_for(baseline_ref: str, cells: list[dict]) -> str:
-    """Identifies the experiment, so history only connects like with like."""
+    """Identifies the experiment: baseline, statistics and the measured matrix."""
+    matrix: dict[str, dict[str, list]] = {}
+    for mode in MODE_IDS:
+        mode_cells = [cell for cell in cells if cell["mode"] == mode]
+        matrix[mode] = {
+            "corpora": sorted({cell["corpus"] for cell in mode_cells}),
+            "threads": sorted({int(cell["threads"]) for cell in mode_cells}),
+        }
     shape = {
         "baseline_ref": baseline_ref,
-        "corpora": sorted({cell["corpus"] for cell in cells}),
-        "threads": sorted({int(cell["threads"]) for cell in cells}),
+        "matrix": matrix,
         "statistics_version": STATISTICS_VERSION,
     }
     return sha256_bytes(compact_json(shape))
+
+
+def modes_summary() -> list[dict]:
+    return [
+        {
+            "id": mode,
+            "label": MODES[mode]["label"],
+            "cflags": list(MODES[mode]["cflags"]),
+            "link_flags": list(MODES[mode]["link_flags"]),
+            "pdb": bool(MODES[mode]["pdb"]),
+            "note": MODES[mode]["note"],
+        }
+        for mode in MODE_IDS
+    ]
 
 
 def load_cells(cells_dir: Path) -> list[dict]:
@@ -787,49 +792,85 @@ def load_cells(cells_dir: Path) -> list[dict]:
         raw = json.loads(path.read_text(encoding="utf-8"))
         if "baseline" not in raw:
             fail(f"{path}: cell has no baseline; bench.py must run with --baseline")
+        mode = raw.get("mode")
+        if mode not in MODES:
+            fail(f"{path}: unknown or missing build mode {mode!r}")
         corpus = Path(raw["corpus"]).name
         if corpus not in CORPUS_IDS:
             fail(f"{path}: unknown corpus {corpus!r}")
         threads = raw.get("threads")
         if not threads:
             fail(f"{path}: cell has no explicit --threads value")
+        if int(raw["runs"]) < MIN_RUNS:
+            fail(f"{path}: {raw['runs']} runs; a published cell needs >= {MIN_RUNS} for its IQR")
+        gate = raw["gate"]["candidate"]
+        if (gate["pdb"] is not None) != bool(MODES[mode]["pdb"]):
+            fail(f"{path}: PDB gate does not match mode {mode!r}")
+
+        def side(data: dict) -> dict:
+            return {
+                "wall_ms": round(float(data["wall_ms"]), 3),
+                "wall_ms_q1": round(float(data["wall_ms_q1"]), 3),
+                "wall_ms_q3": round(float(data["wall_ms_q3"]), 3),
+                "cpu_ms": round(float(data["cpu_ms"]), 3),
+                "rss_mb": round(float(data["rss_mb"]), 3),
+            }
+
         cells.append(
             {
+                "mode": mode,
                 "corpus": corpus,
                 "threads": int(threads),
                 "runs": int(raw["runs"]),
                 "speedup_percent": round(float(raw["speedup_percent"]), 3),
+                "speedup_percent_q1": round(float(raw["speedup_percent_q1"]), 3),
+                "speedup_percent_q3": round(float(raw["speedup_percent_q3"]), 3),
                 "paired_wall_ratio_median": round(float(raw["paired_wall_ratio_median"]), 6),
+                "paired_wall_ratio_q1": round(float(raw["paired_wall_ratio_q1"]), 6),
+                "paired_wall_ratio_q3": round(float(raw["paired_wall_ratio_q3"]), 6),
                 "cpu_delta_percent": round(float(raw["cpu_delta_percent"]), 3),
                 "rss_delta_percent": round(float(raw["rss_delta_percent"]), 3),
-                "candidate": {
-                    "wall_ms": round(float(raw["candidate"]["wall_ms"]), 3),
-                    "cpu_ms": round(float(raw["candidate"]["cpu_ms"]), 3),
-                    "rss_mb": round(float(raw["candidate"]["rss_mb"]), 3),
-                },
-                "baseline": {
-                    "wall_ms": round(float(raw["baseline"]["wall_ms"]), 3),
-                    "cpu_ms": round(float(raw["baseline"]["cpu_ms"]), 3),
-                    "rss_mb": round(float(raw["baseline"]["rss_mb"]), 3),
-                },
+                "candidate": side(raw["candidate"]),
+                "baseline": side(raw["baseline"]),
                 "gate": {
-                    "exe_sha256": raw["gate"]["candidate"]["exe"],
-                    "pdb_sha256": raw["gate"]["candidate"]["pdb"],
-                    "exe_bytes": int(raw["gate"]["candidate"]["exe_bytes"]),
-                    "pdb_bytes": int(raw["gate"]["candidate"]["pdb_bytes"]),
+                    "exe_sha256": gate["exe"],
+                    "pdb_sha256": gate["pdb"],
+                    "exe_bytes": int(gate["exe_bytes"]),
+                    "pdb_bytes": None if gate["pdb_bytes"] is None else int(gate["pdb_bytes"]),
                 },
             }
         )
     if not cells:
         fail(f"{cells_dir}: no measurement cells found")
-    cells.sort(key=lambda cell: (CORPUS_IDS.index(cell["corpus"]), cell["threads"]))
+    # The published file set is fixed, so every mode's panels must have data.
+    missing = [mode for mode in MODE_IDS if not any(cell["mode"] == mode for cell in cells)]
+    if missing:
+        fail(f"{cells_dir}: no cells for build mode(s) {missing}")
+    seen: set[tuple] = set()
+    for cell in cells:
+        identity = (cell["mode"], cell["corpus"], cell["threads"])
+        if identity in seen:
+            fail(f"{cells_dir}: duplicate cell {identity}")
+        seen.add(identity)
+    cells.sort(
+        key=lambda cell: (MODE_IDS.index(cell["mode"]), CORPUS_IDS.index(cell["corpus"]), cell["threads"])
+    )
     return cells
+
+
+def picture(stem: str, alt: str) -> str:
+    """Light/dark variants, switched by the viewer's color scheme."""
+    return (
+        f'<picture><source media="(prefers-color-scheme: dark)" srcset="{stem}-dark.svg">'
+        f'<img src="{stem}-light.svg" alt="{escaped(alt)}"></picture>'
+    )
 
 
 def render_html(latest: dict) -> bytes:
     run = latest["run"]
     runner = latest["runner"]
-    measured_threads = sorted({int(cell["threads"]) for cell in latest["cells"]})
+    cells = latest["cells"]
+    measured_threads = sorted({int(cell["threads"]) for cell in cells})
     peak_threads = measured_threads[-1]
     measured_threads_text = ", ".join(str(t) for t in measured_threads)
     cores_text = runner["cores"] if runner["cores"] else "unknown"
@@ -845,7 +886,7 @@ def render_html(latest: dict) -> bytes:
         f"Thread counts measured this run: {escaped(measured_threads_text)}. "
         "The workflow measures 1, 2 and 4 threads plus the runner's core "
         f"count ({escaped(cores_text)}) when that is larger than 4, so the "
-        f"history panel tracks {escaped(peak_threads)} threads. The headline "
+        f"overview compares modes at {escaped(peak_threads)} threads. The headline "
         "+46% in the project notes was measured at 16 threads on a local "
         f"workstation; {regime_text}"
     )
@@ -865,47 +906,79 @@ def render_html(latest: dict) -> bytes:
         "(createFutureForFile is std::launch::deferred on Linux and "
         "std::launch::async under _WIN64)."
     )
+    lto_modes = [mode for mode in MODE_IDS if MODES[mode]["lto"]]
+    lto_paragraph = " ".join(
+        f"{escaped(MODES[mode]['label'])} is measured on "
+        f"{escaped(', '.join(sorted({c['corpus'] for c in cells if c['mode'] == mode}, key=CORPUS_IDS.index)))} "
+        f"at the highest thread count only: {escaped(MODES[mode]['note'])}."
+        for mode in lto_modes
+    )
+    mode_sections = "".join(
+        f'<h2 id="{mode}">{escaped(MODES[mode]["label"])}</h2>\n'
+        f"<p><code>{escaped(mode_flags_text(mode))}</code><br>{escaped(MODES[mode]['note'])}.</p>\n"
+        + picture(
+            f"link-speed-{mode}",
+            f"{MODES[mode]['label']}: paired link time of stock lld-link and llvm-ld per corpus "
+            "and thread count, with interquartile-range whiskers",
+        )
+        + "\n"
+        for mode in MODE_IDS
+    )
+
+    def iqr(cell: dict) -> str:
+        return (
+            f"{cell['speedup_percent']:+.1f}% "
+            f"({cell['speedup_percent_q1']:+.1f}..{cell['speedup_percent_q3']:+.1f})"
+        )
+
     rows = "".join(
         "<tr>"
+        f"<td>{escaped(MODES[cell['mode']]['label'])}</td>"
         f"<td>{escaped(CORPUS_LABELS[cell['corpus']])}</td>"
         f"<td>{cell['threads']}</td>"
-        f"<td>{cell['speedup_percent']:+.1f}%</td>"
+        f"<td>{cell['runs']}</td>"
+        f"<td>{escaped(iqr(cell))}</td>"
         f"<td>{cell['candidate']['wall_ms']:.1f}</td>"
         f"<td>{cell['baseline']['wall_ms']:.1f}</td>"
         f"<td>{cell['cpu_delta_percent']:+.1f}%</td>"
         f"<td>{cell['rss_delta_percent']:+.1f}%</td>"
         f"<td><code>{escaped(cell['gate']['exe_sha256'][:12])}</code></td>"
+        f"<td><code>{escaped((cell['gate']['pdb_sha256'] or 'none')[:12])}</code></td>"
         "</tr>"
-        for cell in latest["cells"]
+        for cell in cells
+    )
+    mode_nav = " &middot; ".join(
+        f'<a href="#{mode}">{escaped(MODES[mode]["label"])}</a>' for mode in MODE_IDS
     )
     document = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>llvm-ld link speed</title>
-<style>body{{font:15px {FONT_STACK};max-width:1100px;margin:auto;padding:24px;color:#182334}}
-table{{border-collapse:collapse;width:100%;margin:16px 0}}th,td{{border:1px solid #ccd4dd;padding:7px;text-align:left}}
-img{{max-width:100%;height:auto}}code,pre{{overflow-wrap:anywhere;white-space:pre-wrap}}small{{color:#596575}}</style>
+<style>body{{font:15px {FONT_STACK};max-width:1100px;margin:auto;padding:24px;color:#1f2328;background:#ffffff}}
+table{{border-collapse:collapse;width:100%;margin:16px 0;font-size:13px}}th,td{{border:1px solid #d0d7de;padding:6px;text-align:left}}
+img{{max-width:100%;height:auto}}code,pre{{overflow-wrap:anywhere;white-space:pre-wrap}}a{{color:#0969da}}
+@media (prefers-color-scheme: dark){{body{{color:#e6edf3;background:#0d1117}}th,td{{border-color:#30363d}}a{{color:#4493f8}}}}</style>
 </head><body>
 <h1>llvm-ld link speed</h1>
-<p>Every number is a paired A/B measured in one run on one machine: the current
-linker against a baseline built from the payload as it stood before the
-link-speed patches, linking the same corpora interleaved. Hosted runners are
-shared and noisy, so absolute wall time across runs is not published.</p>
-<p>Every cell is gated on byte-identical output: the candidate's EXE and PDB
-match the baseline's exactly, and both are self-deterministic. A speedup that
-changes output bytes is a bug, not a result.</p>
-<nav><a href="latest.json">validated latest data</a> &middot;
-<a href="history.jsonl">compact history</a> &middot;
-<a href="#caveats">scope and caveats</a></nav>
-<h2 id="threads">Speedup by thread count</h2>
-<img src="{THREADS_PANEL}" alt="Link speedup versus linker thread count, one line per corpus; higher is better">
-<h2 id="history">Speedup over time</h2>
-<img src="{HISTORY_PANEL}" alt="Link speedup over published runs at the highest measured thread count, one line per corpus">
-<h2>Cells</h2>
-<table><thead><tr><th>Corpus</th><th>Threads</th><th>Speedup</th><th>Candidate ms</th>
-<th>Baseline ms</th><th>CPU</th><th>Peak RSS</th><th>Output EXE</th></tr></thead>
+<p>How much faster llvm-ld links each kind of build, right now. Every number is
+a paired A/B measured in one run on one machine: the current linker against a
+baseline built from the payload as it stood before the link-speed patches,
+linking the same corpora interleaved. Hosted runners are shared and noisy, so
+times are only compared within a run, never across runs.</p>
+<p>Every cell is gated on byte-identical output: the candidate's EXE (and PDB,
+when the mode produces one) match the baseline's exactly, and both are
+self-deterministic. A speedup that changes output bytes is a bug, not a result.</p>
+<nav><a href="#overview">overview</a> &middot; {mode_nav} &middot;
+<a href="#cells">all cells</a> &middot; <a href="#caveats">scope and caveats</a> &middot;
+<a href="latest.json">validated latest data</a></nav>
+<h2 id="overview">Overview</h2>
+{picture("link-speed-overview", "Percent less link wall time with llvm-ld per build mode and corpus size, at the highest measured thread count")}
+{mode_sections}<h2 id="cells">All cells</h2>
+<table><thead><tr><th>Mode</th><th>Corpus</th><th>Threads</th><th>Runs</th><th>Saved (IQR)</th>
+<th>llvm-ld ms</th><th>Stock ms</th><th>CPU</th><th>Peak RSS</th><th>EXE</th><th>PDB</th></tr></thead>
 <tbody>{rows}</tbody></table>
 <h2 id="caveats">Scope and caveats</h2>
 <p>{thread_cap_paragraph}</p>
+<p>{lto_paragraph}</p>
 <p>{allocator_paragraph}</p>
 <p>{platform_transfer_paragraph}</p>
 <h2>Provenance</h2>
@@ -960,25 +1033,25 @@ def command_render(args: argparse.Namespace) -> int:
             "ref": args.baseline_ref,
             "description": "payload before the link-speed patches",
         },
+        "modes": modes_summary(),
         "cells": cells,
         "actions_run_url": args.actions_run_url,
         "reproduction_command": (
-            "python tests/perf/gen_corpus.py --out build-perf/corpus --profile large && "
+            "python tests/perf/gen_corpus.py --out build-perf/corpus --mode release-pdb --profile large\n"
             "python tests/perf/bench.py --candidate build/llvm-ld-direct "
-            "--baseline build-perf/baseline/llvm-ld-direct --corpus build-perf/corpus/large"
+            "--baseline build-perf/baseline/llvm-ld-direct "
+            "--corpus build-perf/corpus/release-pdb/large --threads 4 --runs 9"
         ),
     }
-
-    rows = read_history(args.history_in, args.initialize_history)
-    rows = merge_history(rows, history_row(latest))
 
     output = args.output_dir
     ensure_empty_output(output)
     (output / ".nojekyll").write_bytes(b"")
     (output / "latest.json").write_bytes(compact_json(latest))
-    (output / "history.jsonl").write_bytes(b"".join(compact_json(row) for row in rows))
-    (output / THREADS_PANEL).write_bytes(threads_panel_svg(latest))
-    (output / HISTORY_PANEL).write_bytes(history_panel_svg(rows, latest["comparison_key"]))
+    for theme in THEMES:
+        (output / overview_panel_name(theme)).write_bytes(overview_panel_svg(latest, theme))
+        for mode in MODE_IDS:
+            (output / mode_panel_name(mode, theme)).write_bytes(mode_panel_svg(latest, mode, theme))
     (output / "index.html").write_bytes(render_html(latest))
     (output / "manifest.json").write_bytes(compact_json(manifest_for(output)))
 
@@ -1108,10 +1181,8 @@ def main() -> int:
 
     render = sub.add_parser("render", help="build the sealed site")
     render.add_argument("--cells-dir", type=Path, required=True)
-    render.add_argument("--history-in", type=Path, required=True)
     render.add_argument("--output-dir", type=Path, required=True)
     render.add_argument("--detached-digest-out", type=Path, required=True)
-    render.add_argument("--initialize-history", action="store_true")
     render.add_argument("--baseline-ref", required=True)
     render.add_argument("--run-id", required=True)
     render.add_argument("--run-attempt", required=True)

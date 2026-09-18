@@ -42,12 +42,19 @@ explicit path (or `rg --no-ignore`) when you actually need to read LLVM optimize
 
 ## Link-speed work: harness and workflow
 
-- Corpora: `python tests/perf/gen_corpus.py --out build-perf/corpus --profile small|medium|large`
-  (deterministic freestanding C++ compiled by clang to MSVC COFF with CodeView; no SDK needed).
+- Corpora: `python tests/perf/gen_corpus.py --out build-perf/corpus --mode <mode> --profile
+  small|medium|large` writes `build-perf/corpus/<mode>/<profile>/` (deterministic freestanding C++
+  compiled by clang to MSVC COFF; no SDK needed). Build modes are `gen_corpus.MODES`: `debug`
+  (`-O0 -g`, `/debug:full /opt:noref,noicf`), `release-pdb` (`-O2 -g`, `/debug:full /opt:ref,icf`;
+  the classic perf corpus), `release-nopdb` (`-O2`, no `/debug`: a control the PDB patches cannot
+  affect) and `thinlto` (`-flto=thin`). Every function is kept live through per-TU tables called
+  from `entry` via a volatile index; without that, ThinLTO folded the program to a 2 KB EXE.
 - Baseline: build the unpatched payload once and copy `llvm-ld-direct` to `build-perf/baseline/`.
   Every candidate is gated against it: `python tests/perf/bench.py --candidate build/llvm-ld-direct
-  --baseline build-perf/baseline/llvm-ld-direct --corpus build-perf/corpus/large`. The gate
-  requires byte-identical EXE and PDB and self-determinism before it prints timings. It also
+  --baseline build-perf/baseline/llvm-ld-direct --corpus build-perf/corpus/release-pdb/large`. The
+  gate requires byte-identical EXE (and PDB, when the corpus's `manifest.json` says the mode
+  writes one) and self-determinism before it prints timings. `--json` output needs `--runs >= 4`
+  so every published cell carries interquartile ranges. It also
   prints CPU and peak-RSS deltas and warns when peak RSS regresses more than `--max-rss-regress`
   (default 5%), because a change that buys wall time with memory is a trade to make on purpose in
   a library that runs inside someone else's process. `--time`
@@ -117,28 +124,38 @@ explicit path (or `rg --no-ignore`) when you actually need to read LLVM optimize
 
 ## Published link-speed charts
 
-`.github/workflows/link-benchmark.yml` republishes the panels from `main` at most once a day. The
-pattern is copied from zackees/mimalloc-pprof's `benchmark-stats` workflow.
+`.github/workflows/link-benchmark.yml` republishes the charts from `main` at most once a day. The
+pattern is copied from zackees/mimalloc-pprof's `benchmark-stats` workflow. The site shows only the
+current run (#32): an overview chart (% less wall time per build mode, one bar per corpus, at the
+highest thread count) and one chart per build mode (paired stock-vs-llvm-ld time per corpus facet
+and thread count), every bar with an IQR whisker. There is no history series; do not re-add one.
+The measurement matrix comes from `gen_corpus.py --print-matrix`, never from hand-written loops:
+ThinLTO is `small` only at the highest thread count with `lto_runs` (5) samples, because one
+medium ThinLTO link takes ~2 minutes even on 16 cores.
 
 Cadence: a daily cron, plus `workflow_dispatch` and `workflow_call` so another workflow can ask
 for a refresh. A `precheck` job compares `github.sha` against `run.source_sha` in the published
 `latest.json` and skips the whole run when `main` has not moved, so an idle repository costs about
 a minute instead of a full measurement; pass `force: true` to measure anyway. Republishing an
-unchanged commit would only add runner noise to the history series.
+unchanged commit would only add runner noise to the published numbers.
 
 - The site is a flat directory of exactly `SITE_FILES` (`tools/bench_report.py`): `.nojekyll`,
-  `index.html`, `latest.json`, `history.jsonl`, `manifest.json` and the two SVG panels. Adding a
-  file means adding it to `SITE_FILES`, `FILE_CAPS`, `MEDIA_TYPES` and `ROLES`, or validation
-  fails both ways (missing *and* unexpected files are errors).
+  `index.html`, `latest.json`, `manifest.json`, and `link-speed-overview-{light,dark}.svg` plus
+  `link-speed-<mode>-{light,dark}.svg` per mode. The SVG entries are derived from
+  `gen_corpus.MODES`, which `bench_report.py` imports, so adding a mode adds its panels; any other
+  file must be added to `SITE_FILES`, `FILE_CAPS`, `MEDIA_TYPES` and `ROLES`, or validation fails
+  both ways (missing *and* unexpected files are errors). Render fails if any mode has no cells.
 - It is sealed by `manifest.json` (path/size/sha256/media type/role per file) plus a detached
   `manifest.sha256` written *outside* the site tree. `validate_site` is the chokepoint and is
   called by render, prepare-branch, validate-revision and audit-pages, and again from a separate
   CI job on the downloaded artifact, so the artifact and the push are checked independently.
 - Publication pushes to the `benchmark-stats` branch with `--force-with-lease` against the SHA
-  read at the start of the run; the branch carries no accumulated history, the time series lives
-  in `history.jsonl` (capped at 1000 rows). The README hotlinks the SVGs off that branch by
+  read at the start of the run; the branch carries no accumulated history. The README hotlinks the
+  SVGs off that branch by
   *branch name*, never a commit SHA, so GitHub's camo proxy revalidates when the blob changes.
-- Panels are hand-written SVG, stdlib only, dark palette, fixed-pixel layout. `validate_svg`
+- Panels are hand-written SVG, stdlib only, fixed-pixel layout, rendered twice (light and dark
+  palettes, `PALETTES`) and embedded with `<picture>`/`prefers-color-scheme`; a media query inside
+  an `<img>`-embedded SVG is not reliable. `validate_html_links` checks `srcset` too. `validate_svg`
   requires a `viewBox` and forbids script, `foreignObject`, `xlink:href`, `<image>`, `@import`,
   inline event handlers and any non-w3.org URL: they are hotlinked into a README and must be
   inert. `index.html` may link out but never *load* out, and every `<img>` needs alt text.
@@ -185,8 +202,8 @@ because hosted runners are shared; see the measurement traps above.
 
 A few scope notes specific to this workflow:
 
-- Thread counts: the workflow measures 1, 2 and 4 threads, plus `nproc` when it is larger than 4,
-  deduplicated. Before this fix, t4 was measured twice on 4-core runners.
+- Thread counts: non-LTO modes measure 1, 2 and 4 threads, plus `nproc` when it is larger than 4,
+  deduplicated by `--print-matrix`. Before that dedup, t4 was measured twice on 4-core runners.
 - Baseline skips: the baseline step skips, with a `::warning::`, any file in the current
   `provenance/payload-prune.json` link-speed set that does not exist at `BASELINE_REF`, and fails
   only if none remain.

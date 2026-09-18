@@ -11,26 +11,65 @@ inputs, licenses, allocator ownership, and the upstream update procedure.
 ## Link speed
 
 The COFF driver's PDB emission was parallelized and its input scan rewritten; the linker produces
-byte-identical EXE and PDB output and links substantially faster. The panels below are republished
-from `main` by the `link-benchmark` workflow, at most once a day and only when the commit has moved.
+byte-identical output and links substantially faster. How much faster depends on the kind of build,
+so every build mode is measured and charted separately. The charts show the current `main` only;
+the `link-benchmark` workflow republishes them at most once a day, and only when the commit has
+moved.
 
-[![Link speedup by thread count, one line per corpus; higher is better](https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speedup-threads.svg)](https://zackees.github.io/llvm-ld/#threads)
+<a href="https://zackees.github.io/llvm-ld/#overview"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-overview-dark.svg">
+  <img alt="Percent less link wall time with llvm-ld per build mode and corpus size, at the highest measured thread count" src="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-overview-light.svg">
+</picture></a>
 
-[![Link speedup over published runs at the highest measured thread count](https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speedup-history.svg)](https://zackees.github.io/llvm-ld/#history)
-
-Each point is a paired A/B measured in a single run on a single machine: the current linker against
+Each bar is a paired A/B measured in a single run on a single machine: the current linker against
 a baseline built from the payload as it stood before the link-speed patches, linking the same
-corpora interleaved. Hosted runners are shared and noisy, so absolute wall time compared across
-runs is deliberately not published — a paired ratio is what survives that noise. Every cell is
-gated on byte-identical output: `tests/perf/bench.py` refuses to report a timing unless the
-candidate's EXE and PDB match the baseline's exactly and both are self-deterministic.
+corpus interleaved, with the interquartile range as a whisker. Hosted runners are shared and noisy,
+so times are only ever compared within one run. Every cell is gated on byte-identical output:
+`tests/perf/bench.py` refuses to report a timing unless the candidate's EXE (and PDB, when the mode
+writes one) match the baseline's exactly and both are self-deterministic.
+
+### By build mode
+
+Paired link time per corpus (64, 512 and 2048 objects) and thread count; stock `lld-link` in gray,
+llvm-ld in blue.
+
+**Debug + PDB**: objects `clang -O0 -g -gcodeview`, link `/debug:full /opt:noref /opt:noicf`.
+
+<a href="https://zackees.github.io/llvm-ld/#debug"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-debug-dark.svg">
+  <img alt="Debug + PDB: paired link time, stock lld-link vs llvm-ld, per corpus and thread count" src="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-debug-light.svg">
+</picture></a>
+
+**Release + PDB**: objects `clang -O2 -g -gcodeview`, link `/debug:full /opt:ref /opt:icf`.
+
+<a href="https://zackees.github.io/llvm-ld/#release-pdb"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-release-pdb-dark.svg">
+  <img alt="Release + PDB: paired link time, stock lld-link vs llvm-ld, per corpus and thread count" src="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-release-pdb-light.svg">
+</picture></a>
+
+**Release, no PDB (control)**: objects `clang -O2`, link `/opt:ref /opt:icf`; no PDB is written, so the PDB-emission patches cannot apply and ~0% is the expected result.
+
+<a href="https://zackees.github.io/llvm-ld/#release-nopdb"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-release-nopdb-dark.svg">
+  <img alt="Release, no PDB (control): paired link time, stock lld-link vs llvm-ld, per corpus and thread count" src="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-release-nopdb-light.svg">
+</picture></a>
+
+**ThinLTO + PDB**: objects `clang -O2 -g -gcodeview -flto=thin`, link `/debug:full /opt:ref /opt:icf`; the link runs LLVM codegen, which the patches do not touch.
+
+<a href="https://zackees.github.io/llvm-ld/#thinlto"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-thinlto-dark.svg">
+  <img alt="ThinLTO + PDB: paired link time, stock lld-link vs llvm-ld, per corpus and thread count" src="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-thinlto-light.svg">
+</picture></a>
 
 **Scope and caveats**
 
-- Thread cap: the workflow measures 1, 2 and 4 threads, plus the runner's core count when that is
-  larger than 4. The hosted `ubuntu-24.04` runner has 4 cores, so the history panel's "highest
-  measured thread count" is 4 there. The +46% headline was measured at 16 threads on a local workstation, and the
-  published panels do not show that regime.
+- Thread cap: non-LTO modes measure 1, 2 and 4 threads, plus the runner's core count when that is
+  larger than 4. The hosted `ubuntu-24.04` runner has 4 cores, so the overview compares modes at 4
+  threads there. The +46% headline was measured at 16 threads on a local workstation, and the
+  published charts do not show that regime.
+- ThinLTO is measured on the small corpus at the highest thread count only, with 5 paired links:
+  every ThinLTO link runs LLVM codegen, and one medium-corpus link takes about two minutes even on
+  16 cores.
 - Allocator: on Linux the benchmarked `llvm-ld-direct` allocates through glibc malloc, because
   `MI_MALLOC_OVERRIDE` is defined only under `if(WIN32)` in `CMakeLists.txt`. The shipped Windows
   DLL allocates through mimalloc. These are parallelisation patches, and contention behaviour
@@ -41,8 +80,9 @@ candidate's EXE and PDB match the baseline's exactly and both are self-determini
   `std::launch::async` under `_WIN64`. A Windows measurement of the same paired ratio is still to
   be done (see issue #23).
 
-The underlying data is on the [`benchmark-stats` branch](https://github.com/zackees/llvm-ld/tree/benchmark-stats)
-(`latest.json`, `history.jsonl`) and on the [dashboard](https://zackees.github.io/llvm-ld/).
+The underlying data is [`latest.json`](https://github.com/zackees/llvm-ld/blob/benchmark-stats/latest.json)
+on the `benchmark-stats` branch, and every cell is tabulated on the
+[dashboard](https://zackees.github.io/llvm-ld/).
 
 ## Building
 
