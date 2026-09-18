@@ -41,17 +41,18 @@ GEN = load(GEN_CORPUS, "gen_corpus_under_test")
 REPORT = load(BENCH_REPORT, "bench_report_under_test")
 
 
-def matrix(max_threads: int = 4) -> list[tuple[str, str, int, int]]:
+def matrix(max_threads: int = 4) -> list[tuple[str, str, int, int, str]]:
     out = subprocess.run(
         [sys.executable, str(GEN_CORPUS), "--print-matrix", "--max-threads", str(max_threads)],
         capture_output=True, text=True, check=True,
     ).stdout
-    return [(m, p, int(t), int(r)) for m, p, t, r in (line.split() for line in out.splitlines())]
+    return [(m, p, int(t), int(r), v) for m, p, t, r, v in (line.split() for line in out.splitlines())]
 
 
-def make_cell(mode: str, corpus: str, threads: int, runs: int, speedup: float = 23.0) -> dict:
+def make_cell(mode: str, corpus: str, threads: int, runs: int, variant: str,
+              speedup: float = 23.0, base_ms: float = 100.0) -> dict:
     """Mirrors the cell JSON tests/perf/bench.py writes."""
-    has_pdb = GEN.MODES[mode]["pdb"]
+    has_pdb = GEN.VARIANTS[variant]["pdb"]
     gate_side = {
         "exe": "a" * 64,
         "pdb": "b" * 64 if has_pdb else None,
@@ -62,13 +63,15 @@ def make_cell(mode: str, corpus: str, threads: int, runs: int, speedup: float = 
     return {
         "corpus": f"/x/build-perf/corpus/{mode}/{corpus}",
         "mode": mode,
+        "variant": variant,
         "runs": runs,
         "threads": threads,
         "extra": [f"/threads:{threads}"],
         "gate": {"candidate": dict(gate_side), "baseline": dict(gate_side)},
-        "candidate": {"wall_ms": 100.0 * ratio, "wall_ms_q1": 99.0 * ratio, "wall_ms_q3": 102.0 * ratio,
-                      "cpu_ms": 150.0, "rss_mb": 50.0},
-        "baseline": {"wall_ms": 100.0, "wall_ms_q1": 98.0, "wall_ms_q3": 103.0, "cpu_ms": 160.0, "rss_mb": 49.0},
+        "candidate": {"wall_ms": base_ms * ratio, "wall_ms_q1": base_ms * 0.99 * ratio,
+                      "wall_ms_q3": base_ms * 1.02 * ratio, "cpu_ms": 150.0, "rss_mb": 50.0},
+        "baseline": {"wall_ms": base_ms, "wall_ms_q1": base_ms * 0.98, "wall_ms_q3": base_ms * 1.03,
+                     "cpu_ms": 160.0, "rss_mb": 49.0},
         "paired_wall_ratio_median": ratio,
         "paired_wall_ratio_q1": ratio - 0.01,
         "paired_wall_ratio_q3": ratio + 0.01,
@@ -83,16 +86,22 @@ def make_cell(mode: str, corpus: str, threads: int, runs: int, speedup: float = 
 def write_cells(cells_dir: pathlib.Path, cells: list[dict]) -> None:
     cells_dir.mkdir(parents=True, exist_ok=True)
     for cell in cells:
-        name = f"{cell['mode']}-{pathlib.Path(cell['corpus']).name}-t{cell['threads']}.json"
+        name = f"{cell['mode']}-{pathlib.Path(cell['corpus']).name}-t{cell['threads']}-{cell['variant']}.json"
         (cells_dir / name).write_text(json.dumps(cell), encoding="utf-8")
 
 
 def full_cells(max_threads: int = 4) -> list[dict]:
+    """The PDB adds 300 ms (well clear of noise) except for LTO, where it adds 1%
+    (inside the IQR), so both the stacked and the within-noise paths render."""
     cells = []
-    for mode, corpus, threads, runs in matrix(max_threads):
-        # The control mode gets a negative cell so the hanging-bar path is rendered.
-        speedup = -1.5 if not GEN.MODES[mode]["pdb"] and corpus == "small" else 23.0
-        cells.append(make_cell(mode, corpus, threads, runs, speedup))
+    for mode, corpus, threads, runs, variant in matrix(max_threads):
+        lto = GEN.MODES[mode]["lto"]
+        if variant == "nopdb":
+            cells.append(make_cell(mode, corpus, threads, runs, variant, speedup=10.0,
+                                   base_ms=10000.0 if lto else 100.0))
+        else:
+            cells.append(make_cell(mode, corpus, threads, runs, variant, speedup=35.0,
+                                   base_ms=10100.0 if lto else 400.0))
     return cells
 
 
@@ -123,7 +132,7 @@ def validate(tmp: pathlib.Path) -> subprocess.CompletedProcess[str]:
 
 
 class BenchReportRenderTest(unittest.TestCase):
-    def test_renders_every_mode_and_passes_validation(self) -> None:
+    def test_renders_the_chart_and_passes_validation(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = pathlib.Path(raw_tmp)
             result = render(tmp, full_cells())
@@ -134,36 +143,36 @@ class BenchReportRenderTest(unittest.TestCase):
             site = tmp / "site"
             names = {path.name for path in site.iterdir()}
             self.assertEqual(names, REPORT.SITE_FILES)
-            self.assertEqual(len(REPORT.SVG_FILES), 1 + len(GEN.MODES))
-            self.assertFalse(any("light" in name for name in names))
-            self.assertFalse(any("history" in name for name in names))
+            # One chart, under the name the README already hotlinks.
+            self.assertEqual(REPORT.SVG_FILES, {"link-speed-overview-dark.svg"})
 
-            for mode, spec in GEN.MODES.items():
-                for theme in ("dark",):
-                    svg = (site / f"link-speed-{mode}-{theme}.svg").read_text(encoding="utf-8")
-                    self.assertIn(" ".join(spec["link_flags"]), svg)
-                    self.assertIn(REPORT.escaped(spec["note"]), svg)
-                    self.assertIn("<title>", svg)
-            overview = (site / "link-speed-overview-dark.svg").read_text(encoding="utf-8")
-            self.assertIn("medium, large not measured", overview)
-            self.assertIn("-1.5%", overview)
-            thinlto = (site / "link-speed-thinlto-dark.svg").read_text(encoding="utf-8")
-            self.assertIn("not measured: ThinLTO codegen", thinlto)
+            chart = (site / "link-speed-overview-dark.svg").read_text(encoding="utf-8")
+            for spec in GEN.MODES.values():
+                self.assertIn(f">{spec['label']}<", chart)
+            for expected in (
+                "<title>", "<pattern", 'stroke-dasharray="3 2"', "stock lld-link", "llvm-ld",
+                "+ PDB (extra time for /debug:full)", "#1f6feb", "#a5d6ff",
+                # 400 -> 260 ms with the PDB, 100 -> 90 ms without: PDB 300 -> 170 ms.
+                "PDB 300 ms → 170 ms (-43%) · link -10%",
+                "PDB cost within noise: codegen dominates",
+                "not measured: ThinLTO codegen is too slow",
+            ):
+                self.assertIn(expected, chart)
+            # The legend comes before the grid.
+            self.assertLess(chart.index("+ PDB (extra time"), chart.index(REPORT.CORPUS_LABELS["small"]))
 
             index_html = (site / "index.html").read_text(encoding="utf-8")
             for expected in (
                 "link-speed-overview-dark.svg", "background:#0d1117", "glibc", "MI_MALLOC_OVERRIDE", "16 threads",
-                "asserted, not measured", "Thread counts measured this run: 1, 2, 4",
-                'id="release-nopdb"', "none",
+                "asserted, not measured", "Thread counts measured this run: 1, 2, 4", "/debug:full", "none",
             ):
                 self.assertIn(expected, index_html)
-            self.assertNotIn("history", index_html)
 
             latest = json.loads((site / "latest.json").read_text(encoding="utf-8"))
-            self.assertEqual(latest["schema_version"], "llvm-ld-link-latest-v2")
+            self.assertEqual(latest["schema_version"], "llvm-ld-link-latest-v3")
             self.assertEqual([m["id"] for m in latest["modes"]], list(GEN.MODES))
-            self.assertTrue(all("mode" in cell for cell in latest["cells"]))
-            nopdb = [cell for cell in latest["cells"] if cell["mode"] == "release-nopdb"]
+            self.assertEqual([v["id"] for v in latest["variants"]], list(GEN.VARIANTS))
+            nopdb = [cell for cell in latest["cells"] if cell["variant"] == "nopdb"]
             self.assertTrue(nopdb and all(cell["gate"]["pdb_sha256"] is None for cell in nopdb))
 
     def test_render_is_byte_deterministic(self) -> None:
@@ -177,15 +186,15 @@ class BenchReportRenderTest(unittest.TestCase):
                     name,
                 )
 
-    def test_overview_tracks_the_actual_peak_thread_count(self) -> None:
+    def test_chart_tracks_the_actual_peak_thread_count(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = pathlib.Path(raw_tmp)
             result = render(tmp, full_cells(max_threads=16), cores="16")
             self.assertEqual(result.returncode, 0, f"render failed: {result.stdout}\n{result.stderr}")
             index_html = (tmp / "site" / "index.html").read_text(encoding="utf-8")
-            self.assertIn("overview compares modes at 16 threads", index_html)
-            overview = (tmp / "site" / "link-speed-overview-dark.svg").read_text(encoding="utf-8")
-            self.assertIn("at 16 threads", overview)
+            self.assertIn("16 threads here", index_html)
+            chart = (tmp / "site" / "link-speed-overview-dark.svg").read_text(encoding="utf-8")
+            self.assertIn("16 threads (each build type", chart)
 
 
 class BenchReportRejectsTest(unittest.TestCase):
@@ -204,16 +213,26 @@ class BenchReportRejectsTest(unittest.TestCase):
         cells[0]["mode"] = "turbo"
         self.assert_render_fails(cells, "unknown or missing build mode")
 
+    def test_unknown_variant_fails(self) -> None:
+        cells = full_cells()
+        cells[0]["variant"] = "halfpdb"
+        self.assert_render_fails(cells, "unknown or missing link variant")
+
+    def test_unpaired_variant_fails(self) -> None:
+        cells = [cell for cell in full_cells()
+                 if not (cell["mode"] == "release" and cell["variant"] == "nopdb" and cell["threads"] == 2)]
+        self.assert_render_fails(cells, "has no 'nopdb' cell")
+
     def test_too_few_runs_fails(self) -> None:
         cells = full_cells()
         cells[0]["runs"] = 3
         self.assert_render_fails(cells, "needs >= 4")
 
-    def test_pdb_gate_must_match_mode(self) -> None:
+    def test_pdb_gate_must_match_variant(self) -> None:
         cells = full_cells()
-        nopdb = next(cell for cell in cells if cell["mode"] == "release-nopdb")
+        nopdb = next(cell for cell in cells if cell["variant"] == "nopdb")
         nopdb["gate"]["candidate"]["pdb"] = "c" * 64
-        self.assert_render_fails(cells, "PDB gate does not match mode")
+        self.assert_render_fails(cells, "PDB gate does not match variant")
 
     def test_remote_srcset_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -235,8 +254,13 @@ class CorpusMatrixTest(unittest.TestCase):
         cells = matrix(4)
         self.assertEqual({mode for mode, *_ in cells}, set(GEN.MODES))
         lto = [cell for cell in cells if GEN.MODES[cell[0]]["lto"]]
-        self.assertTrue(lto and all(threads == 4 and runs == 5 for _, _, threads, runs in lto))
+        self.assertTrue(lto and all(threads == 4 and runs == 5 for _, _, threads, runs, _ in lto))
         self.assertEqual(len(cells), len(set(cells)))
+        # Every measured point is linked in both variants.
+        points = {}
+        for mode, corpus, threads, _, variant in cells:
+            points.setdefault((mode, corpus, threads), set()).add(variant)
+        self.assertTrue(all(variants == set(GEN.VARIANTS) for variants in points.values()))
 
     def test_smoke_matrix_is_small_only(self) -> None:
         out = subprocess.run(

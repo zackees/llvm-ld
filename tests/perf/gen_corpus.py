@@ -6,18 +6,17 @@ CodeView debug info. The shape is chosen to exercise what a real link exercises:
 units sharing a large header (type-record merging, ghash), inline/template COMDATs duplicated
 across TUs (ICF, symbol resolution), plenty of relocations, string literals, and static data.
 
-Build modes (MODES) pair how the objects are compiled with how they are linked, so the published
-charts can say which kind of build each number is for: Debug + PDB, Release + PDB (the only mode
-measured before #32), Release without a PDB (a control: the PDB-emission patches cannot apply), and
-ThinLTO + PDB. MODES is the single source of truth for the measurement matrix: the link-benchmark
-workflow iterates `--print-matrix` rather than hand-writing loops, and tools/bench_report.py
-mirrors the mode ids (a test asserts they match).
+Build modes (MODES) are build types: Debug (-O0 -g), Release (-O2 -g) and ThinLTO. Every corpus is
+linked in both VARIANTS, without /debug and with /debug:full, so the published chart can split a
+link into the link itself and the extra time the PDB adds on the same objects (#35). MODES and
+VARIANTS are the single source of truth for the measurement matrix: the link-benchmark workflow
+iterates `--print-matrix` rather than hand-writing loops, and tools/bench_report.py imports them.
 
 Output layout: <out>/<mode>/<profile>/{NNNN.obj, link.rsp, manifest.json}. The .rsp is the argument
-list used by bench.py; every path in it is relative to that directory. manifest.json records the
-mode, its flags and whether it produces a PDB, which bench.py reads.
+list used by bench.py (without the variant's flags); every path in it is relative to that directory.
+manifest.json records the mode and its flags.
 
-Usage: gen_corpus.py --out build-perf/corpus --mode debug|release-pdb|release-nopdb|thinlto
+Usage: gen_corpus.py --out build-perf/corpus --mode debug|release|thinlto
                      --profile small|medium|large [--clang clang]
        gen_corpus.py --print-matrix --max-threads N [--smoke] [--runs R] [--lto-runs L]
 """
@@ -38,30 +37,33 @@ COMMON_CFLAGS = ["--target=x86_64-pc-windows-msvc", "-c", "-fno-exceptions", "-f
 COMMON_LINK = ["/entry:entry", "/subsystem:console", "/nodefaultlib", "/brepro", "/machine:x64"]
 
 # threads: "all" measures 1, 2, 4 and nproc (deduplicated); "max" measures the highest only.
-# runs: None means the workflow's --runs; the LTO mode takes --lto-runs because every link runs
-# LLVM codegen and costs far more.
+# lto: the LTO mode takes --lto-runs samples because every link runs LLVM codegen.
+# Every mode compiles with CodeView debug info, and each corpus is linked in both VARIANTS, so
+# the published chart can split a link into the link itself and the extra time the PDB adds,
+# on the same objects.
 MODES = {
     "debug": dict(
-        label="Debug + PDB", cflags=["-O0", "-g", "-gcodeview"],
-        link_flags=["/debug:full", "/opt:noref", "/opt:noicf"], pdb=True,
+        label="Debug", cflags=["-O0", "-g", "-gcodeview"],
+        link_flags=["/opt:noref", "/opt:noicf"],
         corpora=["small", "medium", "large"], threads="all", lto=False,
-        note="a Debug build: unoptimized objects, largest debug info, no linker GC or ICF"),
-    "release-pdb": dict(
-        label="Release + PDB", cflags=["-O2", "-g", "-gcodeview"],
-        link_flags=["/debug:full", "/opt:ref", "/opt:icf"], pdb=True,
+        note="unoptimized objects, largest debug info, no linker GC or ICF"),
+    "release": dict(
+        label="Release", cflags=["-O2", "-g", "-gcodeview"],
+        link_flags=["/opt:ref", "/opt:icf"],
         corpora=["small", "medium", "large"], threads="all", lto=False,
-        note="RelWithDebInfo; the mode measured until now"),
-    "release-nopdb": dict(
-        label="Release, no PDB", cflags=["-O2"],
-        link_flags=["/opt:ref", "/opt:icf"], pdb=False,
-        corpora=["small", "medium", "large"], threads="all", lto=False,
-        note="control: no PDB is produced, so the PDB-emission patches cannot apply; expect ~0%"),
+        note="optimized objects with debug info"),
     "thinlto": dict(
-        label="ThinLTO + PDB", cflags=["-O2", "-g", "-gcodeview", "-flto=thin"],
-        link_flags=["/debug:full", "/opt:ref", "/opt:icf"], pdb=True,
+        label="ThinLTO", cflags=["-O2", "-g", "-gcodeview", "-flto=thin"],
+        link_flags=["/opt:ref", "/opt:icf"],
         corpora=["small"], threads="max", lto=True,
-        note="the link runs LLVM codegen, which the patches do not touch; expect a small gain. "
-             "Only small is measured: one medium ThinLTO link takes ~2 minutes even on 16 cores"),
+        note="the link runs LLVM codegen, which the patches do not touch. Only small is measured: "
+             "one medium ThinLTO link takes ~2 minutes even on 16 cores"),
+}
+
+# How each corpus is linked. bench.py adds the variant's flags (and /pdb: for "pdb").
+VARIANTS = {
+    "nopdb": dict(label="link", link_flags=[], pdb=False),
+    "pdb": dict(label="link + PDB", link_flags=["/debug:full", "/pdbaltpath:%_PDB%"], pdb=True),
 }
 
 
@@ -70,12 +72,13 @@ def thread_list(policy: str, max_threads: int) -> list[int]:
     return counts if policy == "all" else [counts[-1]]
 
 
-def matrix(max_threads: int, smoke: bool, runs: int, lto_runs: int) -> list[tuple[str, str, int, int]]:
+def matrix(max_threads: int, smoke: bool, runs: int, lto_runs: int) -> list[tuple[str, str, int, int, str]]:
     cells = []
     for mode, spec in MODES.items():
         for profile in (["small"] if smoke else spec["corpora"]):
             for threads in thread_list(spec["threads"], max_threads):
-                cells.append((mode, profile, threads, lto_runs if spec["lto"] else runs))
+                for variant in VARIANTS:
+                    cells.append((mode, profile, threads, lto_runs if spec["lto"] else runs, variant))
     return cells
 
 
@@ -133,10 +136,10 @@ def tu(idx: int, funcs: int, types: int, inlines: int, tus: int) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", type=pathlib.Path)
-    ap.add_argument("--mode", choices=MODES, default="release-pdb")
+    ap.add_argument("--mode", choices=MODES, default="release")
     ap.add_argument("--profile", choices=PROFILES, default="medium")
     ap.add_argument("--print-matrix", action="store_true",
-                    help="print one 'mode profile threads runs' line per measurement cell and exit")
+                    help="print one 'mode profile threads runs variant' line per measurement cell and exit")
     ap.add_argument("--max-threads", type=int, default=os.cpu_count() or 4)
     ap.add_argument("--smoke", action="store_true", help="with --print-matrix: small corpus only")
     ap.add_argument("--runs", type=int, default=9)
@@ -165,13 +168,13 @@ def main() -> int:
                            stderr=subprocess.DEVNULL)
         return f"{i:04d}.obj"
     with ThreadPoolExecutor(a.jobs) as ex: objs = list(ex.map(build, range(p["tus"])))
-    rsp = [*COMMON_LINK, *spec["link_flags"], *(["/pdbaltpath:%_PDB%"] if spec["pdb"] else []), *objs]
+    rsp = [*COMMON_LINK, *spec["link_flags"], *objs]
     (root / "link.rsp").write_text("\n".join(rsp) + "\n")
     digest = hashlib.sha256()
     for o in objs: digest.update((root / o).read_bytes())
     total = sum((root / o).stat().st_size for o in objs)
     manifest = dict(mode=a.mode, profile=a.profile, **p, cflags=spec["cflags"], link_flags=spec["link_flags"],
-                    pdb=spec["pdb"], objects=len(objs), object_bytes=total, objects_sha256=digest.hexdigest())
+                    objects=len(objs), object_bytes=total, objects_sha256=digest.hexdigest())
     (root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(json.dumps(manifest))
     return 0

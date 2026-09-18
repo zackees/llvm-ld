@@ -3,19 +3,23 @@
 
 Runs a candidate linker binary and a baseline binary over the same corpus, interleaved, and
 reports wall / CPU / peak-RSS medians plus the paired ratio, with interquartile ranges. Before
-timing, it links twice with each and requires the EXE (and the PDB, when the corpus's build mode
-produces one) to be byte-identical and self-deterministic: a speedup that changes output bytes is
-a bug, not a win. The corpus directory's manifest.json (tests/perf/gen_corpus.py) says whether the
-mode produces a PDB. Works with any binary that takes `winlink lld-link <args>` (llvm-ld-direct,
+timing, it links twice with each and requires the EXE (and the PDB, for the `pdb` variant) to be
+byte-identical and self-deterministic: a speedup that changes output bytes is a bug, not a win.
+--variant picks how the corpus is linked (tests/perf/gen_corpus.py VARIANTS): `nopdb` without
+/debug, `pdb` with /debug:full. Without --variant the corpus's link.rsp is used as is and a PDB is
+expected (corpora from before #35 carried /debug:full in link.rsp). Works with any binary that takes `winlink lld-link <args>` (llvm-ld-direct,
 llvm-ld-runner) or a bare lld-link (--bare).
 
 Usage:
   bench.py --candidate build/llvm-ld-direct --baseline build-perf/baseline/llvm-ld-direct \
-           --corpus build-perf/corpus/release-pdb/medium [--runs 10] [--threads N] [--extra /opt:noicf ...]
+           --corpus build-perf/corpus/release/medium --variant pdb [--runs 10] [--threads N] [--extra ...]
   bench.py --candidate ... --corpus ... --time     # lld /time phase breakdown (candidate only)
 """
 from __future__ import annotations
 import argparse, hashlib, json, os, pathlib, resource, shutil, statistics, subprocess, sys, tempfile, time
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from gen_corpus import VARIANTS  # noqa: E402  (the corpus generator owns the link variants)
 
 def sha(p: pathlib.Path) -> str: return hashlib.sha256(p.read_bytes()).hexdigest()
 
@@ -71,6 +75,7 @@ def main() -> int:
     ap.add_argument("--runs", type=int, default=10)
     ap.add_argument("--threads", type=int)
     ap.add_argument("--extra", nargs="*", default=[])
+    ap.add_argument("--variant", choices=sorted(VARIANTS), help="link without (nopdb) or with (pdb) a PDB")
     ap.add_argument("--bare", action="store_true", help="binaries are bare lld-link, not the llvm-ld runner")
     ap.add_argument("--time", action="store_true", help="print lld /time output for the candidate and exit")
     ap.add_argument("--json", type=pathlib.Path)
@@ -81,12 +86,13 @@ def main() -> int:
     corpus = a.corpus.resolve(); rsp = corpus / "link.rsp"
     manifest_path = corpus / "manifest.json"
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
-    # Corpora from before build modes existed carry no "pdb" key; they always linked with /debug.
-    has_pdb = bool(manifest.get("pdb", True))
+    variant = VARIANTS[a.variant] if a.variant else None
+    has_pdb = variant["pdb"] if variant else bool(manifest.get("pdb", True))
     mode = manifest.get("mode")
     if a.json and a.baseline and a.runs < 4:
         raise SystemExit("--json needs --runs >= 4: a published cell must carry an interquartile range")
-    extra = list(a.extra) + ([f"/threads:{a.threads}"] if a.threads else [])
+    extra = (list(variant["link_flags"]) if variant else []) + list(a.extra) \
+        + ([f"/threads:{a.threads}"] if a.threads else [])
     cand = str(pathlib.Path(a.candidate).resolve()); base = str(pathlib.Path(a.baseline).resolve()) if a.baseline else None
     # Comparing a binary against itself yields a meaningless ~0% and every
     # correctness gate still passes, because the outputs really are identical.
@@ -113,7 +119,7 @@ def main() -> int:
             # A mode without a PDB must not produce one either: a stray PDB on one side only
             # would mean the two binaries disagree about what the link does.
             if pdb.exists() != has_pdb:
-                raise SystemExit(f"{exe}: expected {'a' if has_pdb else 'no'} PDB for this build mode")
+                raise SystemExit(f"{exe}: expected {'a' if has_pdb else 'no'} PDB for this variant")
             if not has_pdb:
                 return dict(exe=sha(out), pdb=None, exe_bytes=out.stat().st_size, pdb_bytes=None)
             return dict(exe=sha(out), pdb=sha(pdb), exe_bytes=out.stat().st_size, pdb_bytes=pdb.stat().st_size)
@@ -136,7 +142,7 @@ def main() -> int:
                     shutil.copy(work / f"candidate.{k}", corpus / f"mismatch-candidate.{k}")
                     shutil.copy(work / f"out.{k}", corpus / f"mismatch-baseline.{k}")
                     raise SystemExit(f"BYTE-IDENTITY GATE FAILED: {k} differs (saved to {corpus}/mismatch-*.{k})")
-            pdb_note = f", pdb {gate['candidate']['pdb_bytes']} B" if has_pdb else " (no PDB in this mode)"
+            pdb_note = f", pdb {gate['candidate']['pdb_bytes']} B" if has_pdb else " (no PDB in this variant)"
             print(f"gate ok: exe {gate['candidate']['exe_bytes']} B{pdb_note} identical to baseline")
         samples = {"candidate": [], "baseline": []}
         for i in range(a.runs):
@@ -144,7 +150,7 @@ def main() -> int:
             for name, exe in order:
                 if exe: samples[name].append(run(exe, a.bare, rsp, out, extra, corpus, pdb=has_pdb))
         def med(name, key): return statistics.median(s[key] for s in samples[name])
-        result = dict(corpus=str(corpus), mode=mode, runs=a.runs, threads=a.threads, extra=extra, gate=gate,
+        result = dict(corpus=str(corpus), mode=mode, variant=a.variant, runs=a.runs, threads=a.threads, extra=extra, gate=gate,
                       candidate=dict(wall_ms=med("candidate", "wall") * 1000, cpu_ms=med("candidate", "cpu") * 1000, rss_mb=med("candidate", "rss") / 1e6))
         line = f"candidate: wall {result['candidate']['wall_ms']:.1f} ms  cpu {result['candidate']['cpu_ms']:.1f} ms  rss {result['candidate']['rss_mb']:.0f} MB"
         if base:

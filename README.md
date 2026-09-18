@@ -11,46 +11,30 @@ inputs, licenses, allocator ownership, and the upstream update procedure.
 ## Link speed
 
 The COFF driver's PDB emission was parallelized and its input scan rewritten; the linker produces
-byte-identical output and links substantially faster. How much faster depends on the kind of build,
-so every build mode is measured and charted separately. The charts show the current `main` only;
-the `link-benchmark` workflow republishes them at most once a day, and only when the commit has
-moved.
+byte-identical output and links substantially faster. The chart shows the current `main` only; the
+`link-benchmark` workflow republishes it at most once a day, and only when the commit has moved.
 
-<a href="https://zackees.github.io/llvm-ld/#overview"><img alt="Percent less link wall time with llvm-ld per build mode and corpus size, at the highest measured thread count" src="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-overview-dark.svg"></a>
+<a href="https://zackees.github.io/llvm-ld/#overview"><img alt="Link time of stock lld-link and llvm-ld by build type (Debug, Release, ThinLTO) and corpus size, split into the link itself and the extra time the PDB adds" src="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-overview-dark.svg"></a>
 
-Each bar is a paired A/B measured in a single run on a single machine: the current linker against
-a baseline built from the payload as it stood before the link-speed patches, linking the same
-corpus interleaved, with the interquartile range as a whisker. Hosted runners are shared and noisy,
-so times are only ever compared within one run. Every cell is gated on byte-identical output:
-`tests/perf/bench.py` refuses to report a timing unless the candidate's EXE (and PDB, when the mode
-writes one) match the baseline's exactly and both are self-deterministic.
+Rows are build types (Debug `clang -O0 -g`, Release `clang -O2 -g`, ThinLTO `clang -O2 -g
+-flto=thin`), columns are corpus sizes (64, 512 and 2048 objects). Stock `lld-link` is dark blue,
+llvm-ld is light blue. Each corpus is linked twice with the same objects: the **solid** segment is
+the link without `/debug`, and the **hatched** segment is the extra time `/debug:full` adds to
+write the PDB, which is where the patches work. When that extra time is inside run-to-run noise
+(ThinLTO, where codegen dominates), the cell shows a plain bar and says so.
 
-### By build mode
-
-Paired link time per corpus (64, 512 and 2048 objects) and thread count; stock `lld-link` in green,
-llvm-ld in blue.
-
-**Debug + PDB**: objects `clang -O0 -g -gcodeview`, link `/debug:full /opt:noref /opt:noicf`.
-
-<a href="https://zackees.github.io/llvm-ld/#debug"><img alt="Debug + PDB: paired link time, stock lld-link vs llvm-ld, per corpus and thread count" src="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-debug-dark.svg"></a>
-
-**Release + PDB**: objects `clang -O2 -g -gcodeview`, link `/debug:full /opt:ref /opt:icf`.
-
-<a href="https://zackees.github.io/llvm-ld/#release-pdb"><img alt="Release + PDB: paired link time, stock lld-link vs llvm-ld, per corpus and thread count" src="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-release-pdb-dark.svg"></a>
-
-**Release, no PDB (control)**: objects `clang -O2`, link `/opt:ref /opt:icf`; no PDB is written, so the PDB-emission patches cannot apply and ~0% is the expected result.
-
-<a href="https://zackees.github.io/llvm-ld/#release-nopdb"><img alt="Release, no PDB (control): paired link time, stock lld-link vs llvm-ld, per corpus and thread count" src="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-release-nopdb-dark.svg"></a>
-
-**ThinLTO + PDB**: objects `clang -O2 -g -gcodeview -flto=thin`, link `/debug:full /opt:ref /opt:icf`; the link runs LLVM codegen, which the patches do not touch.
-
-<a href="https://zackees.github.io/llvm-ld/#thinlto"><img alt="ThinLTO + PDB: paired link time, stock lld-link vs llvm-ld, per corpus and thread count" src="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-thinlto-dark.svg"></a>
+Every number is a paired A/B measured in a single run on a single machine: the current linker
+against a baseline built from the payload as it stood before the link-speed patches, linking the
+same corpus interleaved. Hosted runners are shared and noisy, so times are only ever compared within
+one run. Every cell is gated on byte-identical output: `tests/perf/bench.py` refuses to report a
+timing unless the candidate's EXE (and PDB, when one is written) match the baseline's exactly and
+both are self-deterministic.
 
 **Scope and caveats**
 
 - Thread cap: non-LTO modes measure 1, 2 and 4 threads, plus the runner's core count when that is
-  larger than 4. The hosted `ubuntu-24.04` runner has 4 cores, so the overview compares modes at 4
-  threads there. The +46% headline was measured at 16 threads on a local workstation, and the
+  larger than 4. The hosted `ubuntu-24.04` runner has 4 cores, so the chart shows 4 threads
+  there. The +46% headline was measured at 16 threads on a local workstation, and the
   published charts do not show that regime.
 - ThinLTO is measured on the small corpus at the highest thread count only, with 5 paired links:
   every ThinLTO link runs LLVM codegen, and one medium-corpus link takes about two minutes even on

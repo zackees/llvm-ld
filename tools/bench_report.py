@@ -27,11 +27,12 @@ allocator is glibc malloc on Linux rather than the mimalloc the shipped
 Windows build actually uses, and that the Linux-to-Windows transfer of the
 relative speedup is asserted, not measured.
 
-What is measured is chosen per build mode (Debug + PDB, Release + PDB, Release
-without a PDB as a control, ThinLTO + PDB), defined once in
-tests/perf/gen_corpus.py:MODES and imported here. The site shows only the
-current run: an overview chart comparing the modes and one paired-time chart
-per mode, all in one dark theme.
+What is measured is every build type (Debug, Release, ThinLTO) linked both
+without /debug and with /debug:full on the same objects, defined once in
+tests/perf/gen_corpus.py (MODES, VARIANTS) and imported here. The site shows
+only the current run, as one dark chart: rows are build types, columns are
+corpus sizes, and each cell stacks the PDB's extra time on the link itself for
+stock lld-link and llvm-ld.
 
 Subcommands
   render            build the sealed site from measurement cells
@@ -64,8 +65,8 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, NoReturn
 
-LATEST_SCHEMA = "llvm-ld-link-latest-v2"
-MANIFEST_SCHEMA = "llvm-ld-link-site-manifest-v2"
+LATEST_SCHEMA = "llvm-ld-link-latest-v3"
+MANIFEST_SCHEMA = "llvm-ld-link-site-manifest-v3"
 STATISTICS_VERSION = "paired-interleaved-median-iqr-v1"
 
 
@@ -89,6 +90,9 @@ _GENERATOR = _load_generator()
 # Mode ids in publication order (the generator's dict order).
 MODES: dict[str, dict] = _GENERATOR.MODES
 MODE_IDS = tuple(MODES)
+# How every corpus is linked: without /debug ("nopdb") and with /debug:full ("pdb").
+VARIANTS: dict[str, dict] = _GENERATOR.VARIANTS
+VARIANT_IDS = tuple(VARIANTS)
 
 # Corpus ids in publication order. The generator profiles live in
 # tests/perf/gen_corpus.py; these are the ones the workflow measures.
@@ -97,27 +101,11 @@ CORPUS_LABELS = {
     corpus: f"{corpus} · {_GENERATOR.PROFILES[corpus]['tus']} objects" for corpus in CORPUS_IDS
 }
 
-# One dark theme, always (the README shows the dark charts in either GitHub
-# theme). The "-dark" file-name suffix is kept so published URLs stay stable.
-THEMES = ("dark",)
-
-
-def overview_panel_name(theme: str) -> str:
-    return f"link-speed-overview-{theme}.svg"
-
-
-def mode_panel_name(mode: str, theme: str) -> str:
-    return f"link-speed-{mode}-{theme}.svg"
-
-
-SVG_ROLES = {overview_panel_name(theme): f"speed-overview-panel-{theme}" for theme in THEMES}
-SVG_ROLES.update(
-    {
-        mode_panel_name(mode, theme): f"speed-mode-panel-{mode}-{theme}"
-        for mode in MODE_IDS
-        for theme in THEMES
-    }
-)
+# One chart (#35). It keeps the published name of the former overview panel,
+# which the README hotlinks, so no image breaks between a merge and the next
+# publication.
+CHART = "link-speed-overview-dark.svg"
+SVG_ROLES = {CHART: "link-speed-chart"}
 SVG_FILES = frozenset(SVG_ROLES)
 
 SITE_FILES = {".nojekyll", "index.html", "latest.json", "manifest.json"} | SVG_FILES
@@ -200,20 +188,21 @@ def git_command(repository: Path, *args: str) -> bytes:
 
 # ------------------------------------------------------------ SVG rendering
 #
-# Hand-written SVG, fixed pixel layout, one dark theme. The panels are hotlinked from the raw
-# data-branch URL, so they must carry no script, no external reference and no
-# event handler; validate_svg enforces it.
+# One hand-written SVG, fixed pixel layout, dark theme. It is hotlinked from the
+# raw data-branch URL, so it must carry no script, no external reference and no
+# event handler; validate_svg enforces it. <pattern> (the PDB hatch) needs no
+# href and is allowed.
 #
-# Every bar is directly labelled: a hotlinked SVG has no hover layer, so the
-# labels are the only value channel in the README. The dashboard table is the
-# accessible twin.
+# Layout (#35): rows are build types, columns are corpus sizes. Each cell holds
+# two horizontal stacked bars, stock lld-link and llvm-ld, at the mode's highest
+# measured thread count: a solid segment for the link without /debug and a
+# hatched, dotted-outline segment for the extra time /debug:full adds on the
+# same objects. Every value is directly labelled: a hotlinked SVG has no hover
+# layer, and the dashboard table is the accessible twin.
 
-# The dark panel palette of zackees/mimalloc-pprof (ci/benchmark_report.py,
-# SCALING_INK / SCALING_SERIES), so both projects' charts read as one system.
-# There, the project's own allocator is blue and upstream mimalloc is green;
-# here llvm-ld is the same blue and stock (upstream) lld-link the same green.
-# Corpus size is ordinal, so the overview uses a light-to-dark ramp around
-# that blue.
+# Surfaces and text are the dark panel palette of zackees/mimalloc-pprof
+# (ci/benchmark_report.py SCALING_INK), so both projects' charts read as one
+# system. Stock lld-link is a darkish blue and llvm-ld a whiter blue.
 PALETTES = {
     "dark": {
         "background": "#0d1117",
@@ -222,20 +211,28 @@ PALETTES = {
         "axis": "#8b98ad",
         "title": "#e8eef7",
         "muted": "#7d8da5",
-        "baseline": "#3fb950",
-        "candidate": "#58a6ff",
-        "ramp": ("#a5d6ff", "#58a6ff", "#1f6feb"),
+        "baseline": "#1f6feb",
+        "candidate": "#a5d6ff",
     },
 }
+INK = PALETTES["dark"]
+SIDES = (("baseline", "stock lld-link"), ("candidate", "llvm-ld"))
 
 FONT_STACK = "system-ui,-apple-system,Segoe UI,Roboto,sans-serif"
-# Approximate advance per character at 12px for the manual legend flow. The
-# only text-metric assumption in the file; keep labels short.
-CHAR_ADVANCE_12PX = 6.9
+# Approximate advance per character at 12px for manual text flow. The only
+# text-metric assumption in the file; keep labels short.
+CHAR_ADVANCE_12PX = 7.0
 
 WIDTH = 1000
-OVERVIEW_HEIGHT = 560
-MODE_HEIGHT = 460
+ROW_LABEL_WIDTH = 118
+GRID_LEFT = 24
+GRID_RIGHT = 16
+COLUMN_GAP = 16
+GRID_TOP = 150
+ROW_HEIGHT = 138
+BAR_HEIGHT = 20
+BAR_GAP = 8
+VALUE_LABEL_ROOM = 92
 
 
 def svg_text(
@@ -244,7 +241,7 @@ def svg_text(
     value: str,
     *,
     fill: str,
-    size: float = 13,
+    size: float = 12,
     weight: str = "normal",
     anchor: str = "start",
 ) -> str:
@@ -267,92 +264,26 @@ def nice_ceiling(peak: float) -> float:
     return float(magnitude * 10)
 
 
-def svg_open(width: int, height: int, title: str, ink: dict) -> list[str]:
-    return [
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
-        f'width="{width}" height="{height}" role="img">',
-        f"<title>{escaped(title)}</title>",
-        f'<rect width="{width}" height="{height}" fill="{ink["background"]}"/>',
-    ]
+def fmt_time(ms: float, seconds: bool = False) -> str:
+    if seconds or ms >= 10000:
+        return f"{ms / 1000:.1f} s"
+    return f"{ms:,.0f} ms" if ms >= 100 else f"{ms:.1f} ms"
 
 
-def svg_close(parts: list[str]) -> bytes:
-    parts.append("</svg>")
-    return ("\n".join(parts) + "\n").encode("utf-8")
-
-
-def fmt_percent(value: float) -> str:
-    """`+43%`, or one decimal for small values so a control row does not read as a flat 0."""
-    if abs(value) < 10:
-        return f"{value:+.1f}%"
-    return f"{value:+.0f}%"
-
-
-def fmt_ms(value: float) -> str:
-    """Compact enough to sit over a 22px bar: `656`, `1163`, `12.1s`."""
-    if value >= 10000:
-        return f"{value / 1000:.1f}s"
-    if value >= 100:
-        return f"{value:.0f}"
-    return f"{value:.1f}"
-
-
-def fmt_axis_ms(value: float) -> str:
+def fmt_tick(value: float) -> str:
     if value == 0:
         return "0"
-    if value >= 10000:
-        return f"{value / 1000:g} s"
-    return f"{value:,.0f} ms" if value >= 10 else f"{value:g} ms"
+    return f"{value / 1000:g} s" if value >= 10000 else f"{value:,.0f}"
 
 
-def draw_bar(parts: list[str], x: float, y_zero: float, y_end: float, width: float, color: str) -> None:
-    """A bar from the zero line to y_end, rounded (4px) at the data end only."""
-    height = abs(y_end - y_zero)
-    if height < 0.5:
-        parts.append(
-            f'<rect x="{x:.1f}" y="{y_zero - 0.5:.1f}" width="{width:.1f}" height="1" fill="{color}"/>'
-        )
-        return
-    radius = min(4.0, height, width / 2)
-    right = x + width
-    if y_end < y_zero:  # grows up
-        path = (
-            f"M{x:.1f} {y_zero:.1f}V{y_end + radius:.1f}"
-            f"Q{x:.1f} {y_end:.1f} {x + radius:.1f} {y_end:.1f}"
-            f"H{right - radius:.1f}Q{right:.1f} {y_end:.1f} {right:.1f} {y_end + radius:.1f}"
-            f"V{y_zero:.1f}Z"
-        )
-    else:  # hangs below the zero line
-        path = (
-            f"M{x:.1f} {y_zero:.1f}V{y_end - radius:.1f}"
-            f"Q{x:.1f} {y_end:.1f} {x + radius:.1f} {y_end:.1f}"
-            f"H{right - radius:.1f}Q{right:.1f} {y_end:.1f} {right:.1f} {y_end - radius:.1f}"
-            f"V{y_zero:.1f}Z"
-        )
-    parts.append(f'<path d="{path}" fill="{color}"/>')
-
-
-def draw_whisker(parts: list[str], x: float, y_low: float, y_high: float, color: str) -> None:
-    """Interquartile range: a 1px stem with 4px caps."""
-    top, bottom = min(y_low, y_high), max(y_low, y_high)
-    parts.append(
-        f'<path d="M{x:.1f} {top:.1f}V{bottom:.1f}M{x - 4:.1f} {top:.1f}H{x + 4:.1f}'
-        f'M{x - 4:.1f} {bottom:.1f}H{x + 4:.1f}" stroke="{color}" stroke-width="1" fill="none"/>'
+def hatch_pattern(pattern_id: str, color: str) -> str:
+    """Cross-hatch over a faint tint of the side's color."""
+    return (
+        f'<pattern id="{pattern_id}" width="7" height="7" patternUnits="userSpaceOnUse">'
+        f'<rect width="7" height="7" fill="{color}" fill-opacity="0.14"/>'
+        f'<path d="M0 7L7 0M-2 2L2 -2M5 9L9 5M0 0L7 7M-2 5L2 9M5 -2L9 2" '
+        f'stroke="{color}" stroke-width="1.1"/></pattern>'
     )
-
-
-def draw_legend(
-    parts: list[str], items: list[tuple[str, str]], x: float, y: float, ink: dict
-) -> float:
-    """Swatches with labels in a row; returns the x after the last item."""
-    cursor = x
-    for label, color in items:
-        parts.append(
-            f'<rect x="{cursor:.1f}" y="{y - 10:.1f}" width="12" height="12" rx="2" fill="{color}"/>'
-        )
-        parts.append(svg_text(cursor + 18, y, label, fill=ink["title"], size=12))
-        cursor += 18 + CHAR_ADVANCE_12PX * len(label) + 22
-    return cursor
 
 
 def provenance_line(latest: dict) -> str:
@@ -360,7 +291,7 @@ def provenance_line(latest: dict) -> str:
     cores = f", {runner['cores']} cores" if runner["cores"] else ""
     return (
         f"run {latest['run']['run_id']} · source {latest['run']['source_sha'][:12]} · "
-        f"{runner['cpu'] or 'unknown CPU'}{cores} · Linux, glibc malloc"
+        f"{runner['cpu'] or 'unknown CPU'}{cores} · Linux, glibc malloc · shorter is better"
     )
 
 
@@ -373,234 +304,165 @@ def mode_flags_text(mode: str) -> str:
     return f"objects: clang {' '.join(spec['cflags'])} · link: {' '.join(spec['link_flags'])}"
 
 
-def overview_panel_svg(latest: dict, theme: str) -> bytes:
-    """% less wall time per build mode at the highest measured thread count.
-
-    One group per mode, one bar per corpus (ordinal ramp small -> large), each
-    labelled with the percent and the paired times it came from.
-    """
-    ink = PALETTES[theme]
-    cells = latest["cells"]
-    peak = peak_threads_of(cells)
-    title = "Link time saved by llvm-ld, by build mode"
-    parts = svg_open(WIDTH, OVERVIEW_HEIGHT, title, ink)
-    left, right, top, bottom = 84.0, 24.0, 118.0, 400.0
-    plot_width = WIDTH - left - right
-    plot_height = bottom - top
-
-    # One bar per (mode, corpus): the cell at that mode's highest thread count.
-    chosen: dict[str, list[dict]] = {}
+def chart_cells(latest: dict) -> dict[tuple[str, str], dict[str, dict]]:
+    """(mode, corpus) -> {variant: cell} at each mode's highest measured thread count."""
+    chosen: dict[tuple[str, str], dict[str, dict]] = {}
     for mode in MODE_IDS:
-        mode_cells = [cell for cell in cells if cell["mode"] == mode]
-        top_threads = peak_threads_of(mode_cells)
-        chosen[mode] = [cell for cell in mode_cells if int(cell["threads"]) == top_threads]
-    values = [
-        value
-        for group in chosen.values()
-        for cell in group
-        for value in (cell["speedup_percent"], cell["speedup_percent_q1"], cell["speedup_percent_q3"])
+        mode_cells = [cell for cell in latest["cells"] if cell["mode"] == mode]
+        top = peak_threads_of(mode_cells)
+        for cell in mode_cells:
+            if int(cell["threads"]) == top:
+                chosen.setdefault((mode, cell["corpus"]), {})[cell["variant"]] = cell
+    return chosen
+
+
+def pdb_is_visible(pair: dict[str, dict]) -> bool:
+    """The PDB segment is drawn only when it clears run-to-run noise on both sides:
+    the PDB cell's q1 above the no-PDB cell's q3, for stock and for llvm-ld."""
+    return all(
+        pair["pdb"][side]["wall_ms_q1"] > pair["nopdb"][side]["wall_ms_q3"] for side, _ in SIDES
+    )
+
+
+def link_speed_svg(latest: dict) -> bytes:
+    cells = chart_cells(latest)
+    peak = peak_threads_of(latest["cells"])
+    height = GRID_TOP + ROW_HEIGHT * len(MODE_IDS) + 40
+    title = "How long a link takes, and where llvm-ld saves the time"
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {WIDTH} {height}" '
+        f'width="{WIDTH}" height="{height}" role="img">',
+        f"<title>{escaped(title)}: stock lld-link vs llvm-ld, link plus PDB, by build type and corpus size</title>",
+        "<defs>",
+        hatch_pattern("hatch-baseline", INK["baseline"]),
+        hatch_pattern("hatch-candidate", INK["candidate"]),
+        hatch_pattern("hatch-legend", INK["axis"]),
+        "</defs>",
+        f'<rect width="{WIDTH}" height="{height}" fill="{INK["background"]}"/>',
+        svg_text(24, 36, title, fill=INK["title"], size=20, weight="600"),
+        svg_text(
+            24, 58,
+            "solid = the link itself (no /debug) · hatched = extra time to write the PDB "
+            "(/debug:full) · same objects both ways",
+            fill=INK["title"], size=12,
+        ),
+        svg_text(
+            24, 76,
+            f"{peak} threads (each build type's highest measured) · paired interleaved medians · "
+            "every output byte-identical between the two linkers",
+            fill=INK["muted"], size=12,
+        ),
     ]
-    # Ticks on one readable step; room above the tallest bar for its two label lines.
-    step = nice_ceiling(max(max(values + [0.0]) * 1.25, 4.0) / 4)
-    ceiling = step * max(1, math.ceil(max(values + [0.0]) * 1.25 / step))
-    trough = min(values + [0.0])
-    floor = -step * math.ceil(-trough / step) if trough < 0 else 0.0
 
-    def y_of(value: float) -> float:
-        return top + (ceiling - value) / (ceiling - floor) * plot_height
-
-    parts.append(svg_text(left - 36, 40, title, fill=ink["title"], size=20, weight="600"))
+    # Legend first, above the grid.
+    ly, lx = 104.0, 24.0
+    for side, name in SIDES:
+        parts.append(f'<rect x="{lx:.1f}" y="{ly - 10:.1f}" width="12" height="12" rx="2" fill="{INK[side]}"/>')
+        parts.append(svg_text(lx + 18, ly, name, fill=INK["title"]))
+        lx += 18 + CHAR_ADVANCE_12PX * len(name) + 24
+    parts.append(f'<rect x="{lx:.1f}" y="{ly - 10:.1f}" width="22" height="12" fill="{INK["axis"]}"/>')
+    parts.append(svg_text(lx + 28, ly, "link", fill=INK["title"]))
+    lx += 28 + CHAR_ADVANCE_12PX * 4 + 24
     parts.append(
-        svg_text(
-            left - 36,
-            62,
-            "vs. stock lld-link: the LLVM 23.1.0 payload before the patches · same runner, "
-            "interleaved · byte-identical output",
-            fill=ink["muted"],
-            size=13,
-        )
+        f'<rect x="{lx + 0.75:.1f}" y="{ly - 9.25:.1f}" width="20.5" height="10.5" fill="url(#hatch-legend)" '
+        f'stroke="{INK["axis"]}" stroke-width="1.5" stroke-dasharray="3 2"/>'
     )
-    parts.append(
-        svg_text(
-            left - 36,
-            80,
-            f"paired median at {peak} threads (each mode's highest measured) · "
-            "whiskers = interquartile range · higher is better",
-            fill=ink["muted"],
-            size=13,
-        )
-    )
-    parts.append(
-        f'<rect x="{left:.1f}" y="{top:.1f}" width="{plot_width:.1f}" height="{plot_height:.1f}" '
-        f'fill="{ink["plot"]}" rx="6"/>'
-    )
-    for tick in range(round((ceiling - floor) / step) + 1):
-        value = floor + step * tick
-        y = y_of(value)
-        parts.append(
-            f'<line x1="{left:.1f}" y1="{y:.1f}" x2="{left + plot_width:.1f}" y2="{y:.1f}" '
-            f'stroke="{ink["grid"]}" stroke-width="1"/>'
-        )
-        parts.append(svg_text(left - 10, y + 4, f"{value:g}%", fill=ink["axis"], size=12, anchor="end"))
-    zero = y_of(0.0)
-    parts.append(
-        f'<line x1="{left:.1f}" y1="{zero:.1f}" x2="{left + plot_width:.1f}" y2="{zero:.1f}" '
-        f'stroke="{ink["muted"]}" stroke-width="1"/>'
-    )
-    parts.append(svg_text(left, top - 10, "% less wall time (paired median)", fill=ink["muted"], size=11))
+    parts.append(svg_text(lx + 28, ly, "+ PDB (extra time for /debug:full)", fill=INK["title"]))
 
-    group_width = plot_width / len(MODE_IDS)
-    slot = 76.0
-    bar_width = 24.0
-    for index, mode in enumerate(MODE_IDS):
-        centre = left + group_width * (index + 0.5)
-        group = sorted(chosen[mode], key=lambda cell: CORPUS_IDS.index(cell["corpus"]))
-        start = centre - slot * len(group) / 2
-        for position, cell in enumerate(group):
-            x_centre = start + slot * (position + 0.5)
-            color = ink["ramp"][CORPUS_IDS.index(cell["corpus"])]
-            value = cell["speedup_percent"]
-            draw_bar(parts, x_centre - bar_width / 2, zero, y_of(value), bar_width, color)
-            y_low, y_high = y_of(cell["speedup_percent_q1"]), y_of(cell["speedup_percent_q3"])
-            draw_whisker(parts, x_centre, y_low, y_high, ink["muted"])
-            pair = f"{fmt_ms(cell['baseline']['wall_ms'])}→{fmt_ms(cell['candidate']['wall_ms'])} ms"
-            # Labels always sit above the bar, its whisker and the zero line, so a
-            # negative (hanging) bar never pushes them into the group labels.
-            label_top = min(y_of(value), y_high, y_low, zero) - 20
-            parts.append(svg_text(x_centre, label_top, fmt_percent(value), fill=ink["title"], size=13, weight="700", anchor="middle"))
-            parts.append(svg_text(x_centre, label_top + 14, pair, fill=ink["muted"], size=11, anchor="middle"))
-        parts.append(svg_text(centre, bottom + 24, MODES[mode]["label"], fill=ink["title"], size=13, weight="700", anchor="middle"))
-        spec = MODES[mode]
-        parts.append(
-            svg_text(centre, bottom + 40, " ".join(spec["cflags"]), fill=ink["muted"], size=11, anchor="middle")
-        )
-        parts.append(
-            svg_text(centre, bottom + 54, " ".join(spec["link_flags"]), fill=ink["muted"], size=11, anchor="middle")
-        )
-        missing = [corpus for corpus in CORPUS_IDS if corpus not in {cell["corpus"] for cell in group}]
-        if missing:
-            parts.append(
-                svg_text(centre, bottom + 70, f"{', '.join(missing)} not measured", fill=ink["muted"], size=11, anchor="middle")
-            )
-        elif not spec["pdb"]:
-            parts.append(svg_text(centre, bottom + 70, "control: no PDB, expect ~0%", fill=ink["muted"], size=11, anchor="middle"))
+    column_width = (WIDTH - GRID_LEFT - ROW_LABEL_WIDTH - GRID_RIGHT - 2 * COLUMN_GAP) / len(CORPUS_IDS)
 
-    draw_legend(
-        parts,
-        [(CORPUS_LABELS[corpus], ink["ramp"][i]) for i, corpus in enumerate(CORPUS_IDS)],
-        left - 36,
-        OVERVIEW_HEIGHT - 44,
-        ink,
-    )
-    parts.append(svg_text(left - 36, OVERVIEW_HEIGHT - 18, provenance_line(latest), fill=ink["muted"], size=11))
-    return svg_close(parts)
+    def column_x(index: int) -> float:
+        return GRID_LEFT + ROW_LABEL_WIDTH + index * (column_width + COLUMN_GAP)
 
-
-def mode_panel_svg(latest: dict, mode: str, theme: str) -> bytes:
-    """Paired link time (stock lld vs llvm-ld) per corpus facet and thread count."""
-    ink = PALETTES[theme]
-    spec = MODES[mode]
-    cells = [cell for cell in latest["cells"] if cell["mode"] == mode]
-    title = spec["label"]
-    parts = svg_open(WIDTH, MODE_HEIGHT, f"{title}: link time, stock lld-link vs llvm-ld", ink)
-    parts.append(svg_text(24, 36, title, fill=ink["title"], size=20, weight="600"))
-    parts.append(svg_text(24, 58, mode_flags_text(mode), fill=ink["title"], size=12))
-    parts.append(svg_text(24, 76, spec["note"], fill=ink["muted"], size=12))
-
-    facet_top, facet_bottom = 132.0, 330.0
-    facet_gap = 18.0
-    outer_left, outer_right = 24.0, 24.0
-    facet_width = (WIDTH - outer_left - outer_right - 2 * facet_gap) / 3
-    bar_width, bar_gap = 22.0, 8.0
     for index, corpus in enumerate(CORPUS_IDS):
-        fx = outer_left + index * (facet_width + facet_gap)
-        axis_left = fx + 58
-        plot_width = fx + facet_width - axis_left
-        plot_height = facet_bottom - facet_top
-        parts.append(svg_text(fx, facet_top - 18, CORPUS_LABELS[corpus], fill=ink["title"], size=13, weight="700"))
-        parts.append(
-            f'<rect x="{axis_left:.1f}" y="{facet_top:.1f}" width="{plot_width:.1f}" '
-            f'height="{plot_height:.1f}" fill="{ink["plot"]}" rx="6"/>'
-        )
-        facet_cells = sorted(
-            (cell for cell in cells if cell["corpus"] == corpus), key=lambda cell: int(cell["threads"])
-        )
-        if not facet_cells:
+        parts.append(svg_text(column_x(index), GRID_TOP - 12, CORPUS_LABELS[corpus], fill=INK["title"], size=13, weight="700"))
+
+    # Non-LTO build types share one ms axis per column so their rows compare
+    # directly; an LTO row runs codegen (~100x longer) and gets its own axis.
+    shared_ceiling = {}
+    for corpus in CORPUS_IDS:
+        totals = [
+            pair["pdb"][side]["wall_ms"]
+            for (mode, cell_corpus), pair in cells.items()
+            if cell_corpus == corpus and not MODES[mode]["lto"]
+            for side, _ in SIDES
+        ]
+        shared_ceiling[corpus] = nice_ceiling(max(totals) * 1.02) if totals else 10.0
+
+    for row, mode in enumerate(MODE_IDS):
+        ry = GRID_TOP + row * ROW_HEIGHT
+        parts.append(svg_text(GRID_LEFT, ry + 34, MODES[mode]["label"], fill=INK["title"], size=15, weight="700"))
+        parts.append(svg_text(GRID_LEFT, ry + 52, "clang " + " ".join(
+            flag for flag in MODES[mode]["cflags"] if flag != "-gcodeview"), fill=INK["muted"], size=11))
+        for column, corpus in enumerate(CORPUS_IDS):
+            cx = column_x(column)
+            cell_height = ROW_HEIGHT - 14
             parts.append(
-                svg_text(
-                    axis_left + plot_width / 2,
-                    facet_top + plot_height / 2,
-                    "not measured" + (": ThinLTO codegen" if spec["lto"] else ""),
-                    fill=ink["muted"],
-                    size=12,
-                    anchor="middle",
+                f'<rect x="{cx:.1f}" y="{ry:.1f}" width="{column_width:.1f}" height="{cell_height}" '
+                f'fill="{INK["plot"]}" rx="6"/>'
+            )
+            pair = cells.get((mode, corpus))
+            if pair is None:
+                parts.append(svg_text(cx + column_width / 2, ry + cell_height / 2 + 4,
+                                      "not measured" + (": ThinLTO codegen is too slow" if MODES[mode]["lto"] else ""),
+                                      fill=INK["muted"], size=11, anchor="middle"))
+                continue
+            if MODES[mode]["lto"]:
+                ceiling = nice_ceiling(max(pair["pdb"][side]["wall_ms"] for side, _ in SIDES) * 1.02)
+            else:
+                ceiling = shared_ceiling[corpus]
+            seconds = ceiling >= 10000
+            x0 = cx + 10
+            span = column_width - 20 - VALUE_LABEL_ROOM
+
+            def x_of(value: float, x0: float = x0, span: float = span, ceiling: float = ceiling) -> float:
+                return x0 + value / ceiling * span
+
+            axis_y = ry + ROW_HEIGHT - 34
+            for tick in range(3):
+                value = ceiling * tick / 2
+                parts.append(
+                    f'<line x1="{x_of(value):.1f}" y1="{ry + 12:.1f}" x2="{x_of(value):.1f}" y2="{axis_y:.1f}" '
+                    f'stroke="{INK["grid"]}" stroke-width="1"/>'
                 )
-            )
-            continue
-        peak_ms = max(
-            max(cell["baseline"]["wall_ms_q3"], cell["candidate"]["wall_ms_q3"], cell["baseline"]["wall_ms"])
-            for cell in facet_cells
-        )
-        ceiling = nice_ceiling(peak_ms * 1.25)
+                parts.append(svg_text(x_of(value), axis_y + 13, fmt_tick(value), fill=INK["axis"], size=10, anchor="middle"))
 
-        def y_of(value: float, ceiling: float = ceiling) -> float:
-            return facet_bottom - value / ceiling * plot_height
+            visible = pdb_is_visible(pair)
+            for index, (side, _) in enumerate(SIDES):
+                by = ry + 22 + index * (BAR_HEIGHT + BAR_GAP)
+                total = pair["pdb"][side]["wall_ms"]
+                base = pair["nopdb"][side]["wall_ms"] if visible else total
+                color = INK[side]
+                parts.append(
+                    f'<rect x="{x0:.1f}" y="{by:.1f}" width="{x_of(base) - x0:.1f}" height="{BAR_HEIGHT}" fill="{color}"/>'
+                )
+                if visible:
+                    parts.append(
+                        f'<rect x="{x_of(base) + 0.75:.1f}" y="{by + 0.75:.1f}" '
+                        f'width="{max(x_of(total) - x_of(base) - 1.5, 0.0):.1f}" height="{BAR_HEIGHT - 1.5}" '
+                        f'fill="url(#hatch-{side})" stroke="{color}" stroke-width="1.5" stroke-dasharray="3 2"/>'
+                    )
+                label = fmt_time(total, seconds)
+                bold = "700" if side == "candidate" else "normal"
+                parts.append(svg_text(x_of(total) + 6, by + 14, label, fill=INK["title"], size=12, weight=bold))
+                if side == "candidate":
+                    change = -pair["pdb"]["speedup_percent"]
+                    parts.append(svg_text(x_of(total) + 10 + CHAR_ADVANCE_12PX * len(label), by + 14,
+                                          f"{change:+.0f}%", fill=INK["candidate"], size=12, weight="700"))
+            if visible:
+                pdb_stock = pair["pdb"]["baseline"]["wall_ms"] - pair["nopdb"]["baseline"]["wall_ms"]
+                pdb_ours = pair["pdb"]["candidate"]["wall_ms"] - pair["nopdb"]["candidate"]["wall_ms"]
+                note = (
+                    f"PDB {fmt_time(pdb_stock, seconds)} → {fmt_time(pdb_ours, seconds)} "
+                    f"({100 * (pdb_ours / pdb_stock - 1):+.0f}%) · link {-pair['nopdb']['speedup_percent']:+.0f}%"
+                )
+            else:
+                note = "PDB cost within noise" + (": codegen dominates" if MODES[mode]["lto"] else "")
+            parts.append(svg_text(x0, ry + 22 + 2 * (BAR_HEIGHT + BAR_GAP) + 6, note, fill=INK["muted"], size=11))
 
-        for step in range(3):
-            value = ceiling * step / 2
-            y = y_of(value)
-            parts.append(
-                f'<line x1="{axis_left:.1f}" y1="{y:.1f}" x2="{axis_left + plot_width:.1f}" '
-                f'y2="{y:.1f}" stroke="{ink["grid"]}" stroke-width="1"/>'
-            )
-            parts.append(svg_text(axis_left - 6, y + 4, fmt_axis_ms(value), fill=ink["axis"], size=11, anchor="end"))
-        slot = plot_width / len(facet_cells)
-        for position, cell in enumerate(facet_cells):
-            centre = axis_left + slot * (position + 0.5)
-            label_tops = []
-            for side, offset in (("baseline", -(bar_gap + bar_width) / 2), ("candidate", (bar_gap + bar_width) / 2)):
-                data = cell[side]
-                x_centre = centre + offset
-                color = ink["baseline"] if side == "baseline" else ink["candidate"]
-                draw_bar(parts, x_centre - bar_width / 2, facet_bottom, y_of(data["wall_ms"]), bar_width, color)
-                draw_whisker(parts, x_centre, y_of(data["wall_ms_q1"]), y_of(data["wall_ms_q3"]), ink["muted"])
-                label_y = min(y_of(data["wall_ms"]), y_of(data["wall_ms_q3"])) - 6
-                label_tops.append(label_y)
-                parts.append(svg_text(x_centre, label_y, fmt_ms(data["wall_ms"]), fill=ink["muted"], size=11, anchor="middle"))
-            parts.append(
-                svg_text(centre, min(label_tops) - 16, fmt_percent(cell["speedup_percent"]), fill=ink["title"], size=13, weight="700", anchor="middle")
-            )
-            threads = int(cell["threads"])
-            parts.append(
-                svg_text(centre, facet_bottom + 18, f"{threads} thread{'s' if threads != 1 else ''}", fill=ink["muted"], size=11, anchor="middle")
-            )
-        top_cell = facet_cells[-1]
-        parts.append(
-            svg_text(
-                axis_left + plot_width / 2,
-                facet_bottom + 38,
-                f"at {int(top_cell['threads'])} threads: CPU {top_cell['cpu_delta_percent']:+.0f}% · "
-                f"peak RSS {top_cell['rss_delta_percent']:+.1f}%",
-                fill=ink["muted"],
-                size=11,
-                anchor="middle",
-            )
-        )
-
-    runs = sorted({int(cell["runs"]) for cell in cells})
-    runs_text = "/".join(str(value) for value in runs)
-    end = draw_legend(
-        parts,
-        [("stock lld-link (LLVM 23.1.0, before the patches)", ink["baseline"]), ("llvm-ld", ink["candidate"])],
-        outer_left,
-        MODE_HEIGHT - 50,
-        ink,
-    )
-    parts.append(
-        svg_text(end, MODE_HEIGHT - 50, f"n = {runs_text} paired links per bar, medians; whiskers = interquartile range", fill=ink["muted"], size=11)
-    )
-    parts.append(svg_text(outer_left, MODE_HEIGHT - 22, provenance_line(latest) + " · shorter is better", fill=ink["muted"], size=11))
-    return svg_close(parts)
+    parts.append(svg_text(24, height - 16, provenance_line(latest), fill=INK["muted"], size=11))
+    parts.append("</svg>")
+    return ("\n".join(parts) + "\n").encode("utf-8")
 
 
 # --------------------------------------------------------------- validation
@@ -758,6 +620,7 @@ def comparison_key_for(baseline_ref: str, cells: list[dict]) -> str:
         matrix[mode] = {
             "corpora": sorted({cell["corpus"] for cell in mode_cells}),
             "threads": sorted({int(cell["threads"]) for cell in mode_cells}),
+            "variants": sorted({cell["variant"] for cell in mode_cells}),
         }
     shape = {
         "baseline_ref": baseline_ref,
@@ -774,10 +637,21 @@ def modes_summary() -> list[dict]:
             "label": MODES[mode]["label"],
             "cflags": list(MODES[mode]["cflags"]),
             "link_flags": list(MODES[mode]["link_flags"]),
-            "pdb": bool(MODES[mode]["pdb"]),
             "note": MODES[mode]["note"],
         }
         for mode in MODE_IDS
+    ]
+
+
+def variants_summary() -> list[dict]:
+    return [
+        {
+            "id": variant,
+            "label": VARIANTS[variant]["label"],
+            "link_flags": list(VARIANTS[variant]["link_flags"]),
+            "pdb": bool(VARIANTS[variant]["pdb"]),
+        }
+        for variant in VARIANT_IDS
     ]
 
 
@@ -799,9 +673,12 @@ def load_cells(cells_dir: Path) -> list[dict]:
             fail(f"{path}: cell has no explicit --threads value")
         if int(raw["runs"]) < MIN_RUNS:
             fail(f"{path}: {raw['runs']} runs; a published cell needs >= {MIN_RUNS} for its IQR")
+        variant = raw.get("variant")
+        if variant not in VARIANTS:
+            fail(f"{path}: unknown or missing link variant {variant!r}")
         gate = raw["gate"]["candidate"]
-        if (gate["pdb"] is not None) != bool(MODES[mode]["pdb"]):
-            fail(f"{path}: PDB gate does not match mode {mode!r}")
+        if (gate["pdb"] is not None) != bool(VARIANTS[variant]["pdb"]):
+            fail(f"{path}: PDB gate does not match variant {variant!r}")
 
         def side(data: dict) -> dict:
             return {
@@ -815,6 +692,7 @@ def load_cells(cells_dir: Path) -> list[dict]:
         cells.append(
             {
                 "mode": mode,
+                "variant": variant,
                 "corpus": corpus,
                 "threads": int(threads),
                 "runs": int(raw["runs"]),
@@ -838,24 +716,31 @@ def load_cells(cells_dir: Path) -> list[dict]:
         )
     if not cells:
         fail(f"{cells_dir}: no measurement cells found")
-    # The published file set is fixed, so every mode's panels must have data.
+    # Every row of the chart must have data.
     missing = [mode for mode in MODE_IDS if not any(cell["mode"] == mode for cell in cells)]
     if missing:
         fail(f"{cells_dir}: no cells for build mode(s) {missing}")
     seen: set[tuple] = set()
     for cell in cells:
-        identity = (cell["mode"], cell["corpus"], cell["threads"])
+        identity = (cell["mode"], cell["corpus"], cell["threads"], cell["variant"])
         if identity in seen:
             fail(f"{cells_dir}: duplicate cell {identity}")
         seen.add(identity)
+    # The chart stacks the PDB's extra time on the link without it, so every
+    # measured point needs both variants.
+    for mode, corpus, threads, _ in seen:
+        for variant in VARIANT_IDS:
+            if (mode, corpus, threads, variant) not in seen:
+                fail(f"{cells_dir}: {mode}/{corpus}/t{threads} has no {variant!r} cell")
     cells.sort(
-        key=lambda cell: (MODE_IDS.index(cell["mode"]), CORPUS_IDS.index(cell["corpus"]), cell["threads"])
+        key=lambda cell: (
+            MODE_IDS.index(cell["mode"]),
+            CORPUS_IDS.index(cell["corpus"]),
+            cell["threads"],
+            VARIANT_IDS.index(cell["variant"]),
+        )
     )
     return cells
-
-
-def picture(stem: str, alt: str) -> str:
-    return f'<img src="{stem}-dark.svg" alt="{escaped(alt)}">'
 
 
 def render_html(latest: dict) -> bytes:
@@ -877,8 +762,8 @@ def render_html(latest: dict) -> bytes:
     thread_cap_paragraph = (
         f"Thread counts measured this run: {escaped(measured_threads_text)}. "
         "The workflow measures 1, 2 and 4 threads plus the runner's core "
-        f"count ({escaped(cores_text)}) when that is larger than 4, so the "
-        f"overview compares modes at {escaped(peak_threads)} threads. The headline "
+        f"count ({escaped(cores_text)}) when that is larger than 4; the chart "
+        f"shows each build type at its highest, {escaped(peak_threads)} threads here. The headline "
         "+46% in the project notes was measured at 16 threads on a local "
         f"workstation; {regime_text}"
     )
@@ -905,16 +790,15 @@ def render_html(latest: dict) -> bytes:
         f"at the highest thread count only: {escaped(MODES[mode]['note'])}."
         for mode in lto_modes
     )
-    mode_sections = "".join(
-        f'<h2 id="{mode}">{escaped(MODES[mode]["label"])}</h2>\n'
-        f"<p><code>{escaped(mode_flags_text(mode))}</code><br>{escaped(MODES[mode]['note'])}.</p>\n"
-        + picture(
-            f"link-speed-{mode}",
-            f"{MODES[mode]['label']}: paired link time of stock lld-link and llvm-ld per corpus "
-            "and thread count, with interquartile-range whiskers",
-        )
-        + "\n"
+    mode_items = "".join(
+        f"<li><b>{escaped(MODES[mode]['label'])}</b>: <code>{escaped(mode_flags_text(mode))}</code>; "
+        f"{escaped(MODES[mode]['note'])}.</li>"
         for mode in MODE_IDS
+    )
+    variant_items = "".join(
+        f"<li><b>{escaped(VARIANTS[variant]['label'])}</b>: "
+        f"<code>{escaped(' '.join(VARIANTS[variant]['link_flags']) or 'no /debug')}</code></li>"
+        for variant in VARIANT_IDS
     )
 
     def iqr(cell: dict) -> str:
@@ -926,6 +810,7 @@ def render_html(latest: dict) -> bytes:
     rows = "".join(
         "<tr>"
         f"<td>{escaped(MODES[cell['mode']]['label'])}</td>"
+        f"<td>{escaped(VARIANTS[cell['variant']]['label'])}</td>"
         f"<td>{escaped(CORPUS_LABELS[cell['corpus']])}</td>"
         f"<td>{cell['threads']}</td>"
         f"<td>{cell['runs']}</td>"
@@ -939,9 +824,6 @@ def render_html(latest: dict) -> bytes:
         "</tr>"
         for cell in cells
     )
-    mode_nav = " &middot; ".join(
-        f'<a href="#{mode}">{escaped(MODES[mode]["label"])}</a>' for mode in MODE_IDS
-    )
     document = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>llvm-ld link speed</title>
@@ -950,21 +832,24 @@ table{{border-collapse:collapse;width:100%;margin:16px 0;font-size:13px}}th,td{{
 img{{max-width:100%;height:auto}}code,pre{{overflow-wrap:anywhere;white-space:pre-wrap}}a{{color:#4493f8}}</style>
 </head><body>
 <h1>llvm-ld link speed</h1>
-<p>How much faster llvm-ld links each kind of build, right now. Every number is
+<p>How long a link takes, and where llvm-ld saves the time, right now. Every number is
 a paired A/B measured in one run on one machine: the current linker against a
 baseline built from the payload as it stood before the link-speed patches,
 linking the same corpora interleaved. Hosted runners are shared and noisy, so
 times are only compared within a run, never across runs.</p>
 <p>Every cell is gated on byte-identical output: the candidate's EXE (and PDB,
-when the mode produces one) match the baseline's exactly, and both are
+when the variant writes one) match the baseline's exactly, and both are
 self-deterministic. A speedup that changes output bytes is a bug, not a result.</p>
-<nav><a href="#overview">overview</a> &middot; {mode_nav} &middot;
-<a href="#cells">all cells</a> &middot; <a href="#caveats">scope and caveats</a> &middot;
-<a href="latest.json">validated latest data</a></nav>
-<h2 id="overview">Overview</h2>
-{picture("link-speed-overview", "Percent less link wall time with llvm-ld per build mode and corpus size, at the highest measured thread count")}
-{mode_sections}<h2 id="cells">All cells</h2>
-<table><thead><tr><th>Mode</th><th>Corpus</th><th>Threads</th><th>Runs</th><th>Saved (IQR)</th>
+<nav><a href="#overview">chart</a> &middot; <a href="#cells">all cells</a> &middot;
+<a href="#caveats">scope and caveats</a> &middot; <a href="latest.json">validated latest data</a></nav>
+<h2 id="overview">Link time, and what the PDB adds</h2>
+<img src="{CHART}" alt="Link time of stock lld-link and llvm-ld by build type and corpus size, split into the link itself and the extra time the PDB adds">
+<p>Each corpus is linked twice with the same objects, once per variant, so the hatched segment is only the PDB's extra time:</p>
+<ul>{variant_items}</ul>
+<p>Build types:</p>
+<ul>{mode_items}</ul>
+<h2 id="cells">All cells</h2>
+<table><thead><tr><th>Build</th><th>Variant</th><th>Corpus</th><th>Threads</th><th>Runs</th><th>Saved (IQR)</th>
 <th>llvm-ld ms</th><th>Stock ms</th><th>CPU</th><th>Peak RSS</th><th>EXE</th><th>PDB</th></tr></thead>
 <tbody>{rows}</tbody></table>
 <h2 id="caveats">Scope and caveats</h2>
@@ -1025,13 +910,14 @@ def command_render(args: argparse.Namespace) -> int:
             "description": "payload before the link-speed patches",
         },
         "modes": modes_summary(),
+        "variants": variants_summary(),
         "cells": cells,
         "actions_run_url": args.actions_run_url,
         "reproduction_command": (
-            "python tests/perf/gen_corpus.py --out build-perf/corpus --mode release-pdb --profile large\n"
+            "python tests/perf/gen_corpus.py --out build-perf/corpus --mode release --profile large\n"
             "python tests/perf/bench.py --candidate build/llvm-ld-direct "
             "--baseline build-perf/baseline/llvm-ld-direct "
-            "--corpus build-perf/corpus/release-pdb/large --threads 4 --runs 9"
+            "--corpus build-perf/corpus/release/large --variant pdb --threads 4 --runs 9"
         ),
     }
 
@@ -1039,10 +925,7 @@ def command_render(args: argparse.Namespace) -> int:
     ensure_empty_output(output)
     (output / ".nojekyll").write_bytes(b"")
     (output / "latest.json").write_bytes(compact_json(latest))
-    for theme in THEMES:
-        (output / overview_panel_name(theme)).write_bytes(overview_panel_svg(latest, theme))
-        for mode in MODE_IDS:
-            (output / mode_panel_name(mode, theme)).write_bytes(mode_panel_svg(latest, mode, theme))
+    (output / CHART).write_bytes(link_speed_svg(latest))
     (output / "index.html").write_bytes(render_html(latest))
     (output / "manifest.json").write_bytes(compact_json(manifest_for(output)))
 

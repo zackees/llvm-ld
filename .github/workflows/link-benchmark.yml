@@ -15,11 +15,12 @@ name: link-benchmark
 # before tests/perf/bench.py will report any timing at all.
 #
 # What is measured is the matrix `tests/perf/gen_corpus.py --print-matrix`
-# prints: every build mode in gen_corpus.MODES (Debug + PDB, Release + PDB,
-# Release without a PDB as a control, ThinLTO + PDB) x its corpora x its
-# thread counts. Non-LTO modes measure 1, 2 and 4 threads plus nproc when it is
-# larger than 4; ThinLTO measures only the highest count, on `small` only,
-# with `lto_runs` samples, because every ThinLTO link runs LLVM codegen. On a
+# prints: every build type in gen_corpus.MODES (Debug, Release, ThinLTO) x its
+# corpora x its thread counts x both link variants (no /debug, /debug:full), so
+# the chart can split each link into the link itself and the PDB's extra time.
+# Non-LTO modes measure 1, 2 and 4 threads plus nproc when it is larger than
+# 4; ThinLTO measures only the highest count, on `small` only, with `lto_runs`
+# samples, because every ThinLTO link runs LLVM codegen. On a
 # 4-core hosted runner the highest count is therefore 4, not the 16-thread
 # regime behind the headline figure in CLAUDE.md.
 
@@ -404,15 +405,15 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           # The thread list is deduplicated by --print-matrix: nproc == 4 on the
           # hosted runner, and a duplicate cell would overwrite its twin.
-          while read -r mode profile threads runs; do
+          while read -r mode profile threads runs variant; do
             START=$(date +%s)
             python3 tests/perf/bench.py \
               --candidate "$RUNNER_TEMP/bin/candidate" \
               --baseline "$RUNNER_TEMP/bin/baseline" \
-              --corpus "build-perf/corpus/$mode/$profile" \
+              --corpus "build-perf/corpus/$mode/$profile" --variant "$variant" \
               --runs "$runs" --threads "$threads" \
-              --json "$RUNNER_TEMP/cells/$mode-$profile-t$threads.json" < /dev/null
-            echo "| $mode/$profile/t$threads | $(( $(date +%s) - START )) s |" >> "$GITHUB_STEP_SUMMARY"
+              --json "$RUNNER_TEMP/cells/$mode-$profile-t$threads-$variant.json" < /dev/null
+            echo "| $mode/$profile/t$threads/$variant | $(( $(date +%s) - START )) s |" >> "$GITHUB_STEP_SUMMARY"
           done < "$RUNNER_TEMP/matrix.txt"
 
       - name: render site
