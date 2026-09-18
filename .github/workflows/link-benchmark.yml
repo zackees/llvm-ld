@@ -5,12 +5,20 @@ name: link-benchmark
 #
 # Every number is a paired A/B measured in one run on one machine: the current
 # linker against a baseline built from the payload as it stood before the
-# link-speed patches. Only six payload files differ between the two, so the
-# baseline is a ~40s incremental rebuild rather than a second full LLVM build.
+# link-speed patches. Only the link-speed payload files (six today) differ
+# between the two, so the baseline is an incremental rebuild of a handful of
+# translation units plus a relink, measured at 1.6-1.8 min on a hosted runner
+# (~40 s on a 16-thread workstation), rather than a second full LLVM build.
 # Hosted runners are shared and noisy, so absolute wall time compared across
 # runs would publish that noise as signal; a paired ratio measured in a single
 # run does not. Both binaries also have to produce byte-identical EXE and PDB
 # before tests/perf/bench.py will report any timing at all.
+#
+# The measured thread counts are 1, 2 and 4, plus the runner's core count
+# (nproc) when it is larger than 4, each measured once. On a 4-core hosted
+# runner the highest measured count is therefore 4, so the history panel's
+# "highest measured thread count" tracks 4 threads, not the 16-thread regime
+# behind the headline figure in CLAUDE.md.
 
 on:
   workflow_dispatch:
@@ -68,7 +76,8 @@ permissions:
 env:
   PUBLISH_REF: refs/heads/benchmark-stats
   # The payload immediately before the link-speed patches (#14). The baseline
-  # linker is this commit's version of the six patched files.
+  # linker is this commit's version of the link-speed payload files (six today;
+  # any file that does not exist at this commit is skipped with a warning).
   BASELINE_REF: f9cdd65cbfb5f64654ce428524a8126652bed8a7
 
 jobs:
@@ -278,9 +287,12 @@ jobs:
           mkdir -p "$RUNNER_TEMP/bin"
           cp build/llvm-ld-direct "$RUNNER_TEMP/bin/candidate"
 
-      # Rebuild only the six patched payload files at their pre-optimization
-      # revision. The build tree is otherwise untouched, so this is a handful of
-      # translation units and a relink.
+      # Rebuild the link-speed payload files at their pre-optimisation revision.
+      # A file listed in the current provenance/payload-prune.json but absent at
+      # BASELINE_REF is skipped with a warning (failing only if none remain), so
+      # a future link-speed patch that adds a new payload file cannot break the
+      # benchmark. The build tree is otherwise untouched, so this is a handful
+      # of translation units and a relink.
       - name: build the baseline linker
         if: steps.prebuilt.outputs.found != 'true'
         env:
@@ -290,12 +302,28 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
         run: |
           set -euo pipefail
-          FILES=$(python3 -c "
+          CANDIDATE_FILES=$(python3 -c "
           import json
           d = json.load(open('provenance/payload-prune.json'))
           print(' '.join('llvm-project/' + e['path'] for e in d['patched'] if 'link-speed' in e['reason']))
           ")
-          test -n "$FILES"
+          if [ -z "$CANDIDATE_FILES" ]; then
+            echo "::error::provenance/payload-prune.json lists no link-speed payload files; the baseline cannot be reconstructed"
+            exit 1
+          fi
+          FILES=""
+          for f in $CANDIDATE_FILES; do
+            if git cat-file -e "$BASELINE_REF:$f" 2>/dev/null; then
+              FILES="$FILES $f"
+            else
+              echo "::warning::$f does not exist at $BASELINE_REF; building the baseline with the current version of that file"
+            fi
+          done
+          FILES="${FILES# }"
+          if [ -z "$FILES" ]; then
+            echo "::error::none of the link-speed payload files listed in provenance/payload-prune.json exist at $BASELINE_REF; the baseline cannot be reconstructed"
+            exit 1
+          fi
           echo "baseline files: $FILES"
           git checkout "$BASELINE_REF" -- $FILES
           cmake --build build --target llvm-ld-direct
@@ -360,8 +388,12 @@ jobs:
           mkdir -p "$RUNNER_TEMP/cells"
           RUNS="${{ inputs.runs || 9 }}"
           MAX_THREADS="$(nproc)"
+          # nproc == 4 on the hosted runner; without dedup t4 was measured twice
+          # and the second cell overwrote the first.
+          THREAD_LIST=$(printf '%s\n' 1 2 4 "$MAX_THREADS" | sort -n -u | tr '\n' ' ')
+          echo "thread counts: $THREAD_LIST"
           for profile in $PROFILES; do
-            for threads in 1 2 4 "$MAX_THREADS"; do
+            for threads in $THREAD_LIST; do
               python3 tests/perf/bench.py \
                 --candidate "$RUNNER_TEMP/bin/candidate" \
                 --baseline "$RUNNER_TEMP/bin/baseline" \

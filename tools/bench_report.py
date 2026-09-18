@@ -20,6 +20,13 @@ refuses to report a timing unless the candidate's EXE and PDB match the
 baseline's exactly and both are self-deterministic. A speedup that changes
 output bytes is a bug, not a result.
 
+The rendered dashboard also discloses three validity gaps up front, rather
+than leaving a reader to infer them: the thread cap of the hosted runner
+relative to the historical headline number, the fact that the measured
+allocator is glibc malloc on Linux rather than the mimalloc the shipped
+Windows build actually uses, and that the Linux-to-Windows transfer of the
+relative speedup is asserted, not measured.
+
 Subcommands
   render            build the sealed site from measurement cells + prior history
   validate-site     re-check a site directory against the manifest and allowlist
@@ -427,7 +434,7 @@ def threads_panel_svg(latest: dict) -> bytes:
     footer(
         parts,
         f"run {latest['run']['run_id']} - source {latest['run']['source_sha'][:12]} - "
-        f"{latest['runner']['cpu']} - higher is better",
+        f"{latest['runner']['cpu']} - Linux, glibc malloc - higher is better",
         HEIGHT,
     )
     return svg_close(parts)
@@ -450,18 +457,29 @@ def history_panel_svg(rows: list[dict], comparison_key: str) -> bytes:
             series.setdefault(corpus, []).append((float(index), float(value)))
 
     values = [value for points in series.values() for _, value in points]
-    peak = max(values + [0.0])
+    peak_value = max(values + [0.0])
     trough = min(values + [0.0])
-    ceiling = nice_ceiling(peak * 1.12) if values else 10.0
+    ceiling = nice_ceiling(peak_value * 1.12) if values else 10.0
     floor = 0.0 if trough >= 0 else -nice_ceiling(abs(trough) * 1.2)
+
+    peak = None
+    if compatible and "peak_threads" in compatible[-1]:
+        peak = int(compatible[-1]["peak_threads"])
+    if peak is not None:
+        subtitle = (
+            f"{len(compatible)} run(s) sharing one baseline and corpus set; "
+            f"at {peak} threads, the highest measured (capped by runner cores)"
+        )
+    else:
+        subtitle = (
+            f"{len(compatible)} run(s) sharing one baseline and corpus set; "
+            "at the highest measured thread count"
+        )
 
     draw_frame(
         parts,
         title="Link speedup over time",
-        subtitle=(
-            f"{len(compatible)} run(s) sharing one baseline and corpus set; "
-            "at the highest measured thread count"
-        ),
+        subtitle=subtitle,
         left=PLOT_LEFT,
         top=PLOT_TOP,
         plot_width=plot_width,
@@ -513,7 +531,11 @@ def history_panel_svg(rows: list[dict], comparison_key: str) -> bytes:
                 anchor="end",
             )
         )
-    footer(parts, "one point per published run - higher is better", HEIGHT)
+    footer(
+        parts,
+        "one point per published run - highest measured thread count - higher is better",
+        HEIGHT,
+    )
     return svg_close(parts)
 
 
@@ -807,6 +829,42 @@ def load_cells(cells_dir: Path) -> list[dict]:
 def render_html(latest: dict) -> bytes:
     run = latest["run"]
     runner = latest["runner"]
+    measured_threads = sorted({int(cell["threads"]) for cell in latest["cells"]})
+    peak_threads = measured_threads[-1]
+    measured_threads_text = ", ".join(str(t) for t in measured_threads)
+    cores_text = runner["cores"] if runner["cores"] else "unknown"
+    if peak_threads < 16:
+        regime_text = (
+            f"this run's highest thread count cannot reproduce that regime, so "
+            f"the speedup at {escaped(peak_threads)} threads is expected to be "
+            "smaller."
+        )
+    else:
+        regime_text = "this run reaches that regime."
+    thread_cap_paragraph = (
+        f"Thread counts measured this run: {escaped(measured_threads_text)}. "
+        "The workflow measures 1, 2 and 4 threads plus the runner's core "
+        f"count ({escaped(cores_text)}) when that is larger than 4, so the "
+        f"history panel tracks {escaped(peak_threads)} threads. The headline "
+        "+46% in the project notes was measured at 16 threads on a local "
+        f"workstation; {regime_text}"
+    )
+    allocator_paragraph = (
+        "Allocator: on Linux the benchmarked llvm-ld-direct allocates "
+        "through glibc malloc, because MI_MALLOC_OVERRIDE is defined only "
+        "for WIN32 builds in CMakeLists.txt. The shipped Windows DLL "
+        "allocates through mimalloc. These are parallelisation patches, and "
+        "allocator behaviour under thread contention differs between glibc "
+        "arenas and mimalloc."
+    )
+    platform_transfer_paragraph = (
+        "Measured on Linux; the shipping target is Windows. That the "
+        "relative speedup transfers to Windows is asserted, not measured: "
+        "no Windows run of this paired ratio has been published yet, and "
+        "at least one optimised phase is known to diverge "
+        "(createFutureForFile is std::launch::deferred on Linux and "
+        "std::launch::async under _WIN64)."
+    )
     rows = "".join(
         "<tr>"
         f"<td>{escaped(CORPUS_LABELS[cell['corpus']])}</td>"
@@ -836,7 +894,8 @@ shared and noisy, so absolute wall time across runs is not published.</p>
 match the baseline's exactly, and both are self-deterministic. A speedup that
 changes output bytes is a bug, not a result.</p>
 <nav><a href="latest.json">validated latest data</a> &middot;
-<a href="history.jsonl">compact history</a></nav>
+<a href="history.jsonl">compact history</a> &middot;
+<a href="#caveats">scope and caveats</a></nav>
 <h2 id="threads">Speedup by thread count</h2>
 <img src="{THREADS_PANEL}" alt="Link speedup versus linker thread count, one line per corpus; higher is better">
 <h2 id="history">Speedup over time</h2>
@@ -845,6 +904,10 @@ changes output bytes is a bug, not a result.</p>
 <table><thead><tr><th>Corpus</th><th>Threads</th><th>Speedup</th><th>Candidate ms</th>
 <th>Baseline ms</th><th>CPU</th><th>Peak RSS</th><th>Output EXE</th></tr></thead>
 <tbody>{rows}</tbody></table>
+<h2 id="caveats">Scope and caveats</h2>
+<p>{thread_cap_paragraph}</p>
+<p>{allocator_paragraph}</p>
+<p>{platform_transfer_paragraph}</p>
 <h2>Provenance</h2>
 <p>Run {escaped(run["run_id"])} attempt {escaped(run["run_attempt"])};
 source <code>{escaped(run["source_sha"])}</code>;
@@ -856,8 +919,6 @@ fingerprint <code>{escaped(runner["fingerprint_sha256"])}</code>.</p>
 <p><a href="{escaped(latest["actions_run_url"])}">Actions run</a></p>
 <h2>Reproduce</h2>
 <pre><code>{escaped(latest["reproduction_command"])}</code></pre>
-<p><small>Measured on Linux. The shipping target is Windows; the relative
-speedup is what transfers, not the absolute times.</small></p>
 </body></html>
 """
     return document.encode("utf-8")
