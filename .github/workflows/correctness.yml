@@ -2,6 +2,10 @@
 on:
   pull_request:
   workflow_dispatch:
+  # Nightly: the full job plus the Tier 2 external comparison against the release lld-link.exe
+  # (issue #30). Skipped by `precheck` when main has not moved since the last green nightly.
+  schedule:
+    - cron: '17 6 * * *'
 
 # One live run per workflow per ref: a new push to a branch or PR cancels the
 # superseded run instead of queuing behind it in the shared account-wide runner
@@ -11,7 +15,33 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  precheck:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != schedule ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          last=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/correctness.yml/runs?event=schedule&branch=main&status=success&per_page=1" --jq '.workflow_runs[0].head_sha // ""')
+          if [ "$last" = "$GITHUB_SHA" ]; then
+            echo "main is still at $GITHUB_SHA, already validated by a successful nightly run - skipping"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "main moved (${last:-no previous green nightly} -> $GITHUB_SHA) - running"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
   deterministic-coff:
+    needs: precheck
+    if: needs.precheck.outputs.run == 'true'
     runs-on: windows-2025
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -49,10 +79,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.LLVM_LD_CLANGCL_ROOT }}
-          key: clangcl-${{ env.LLVM_LD_CLANGCL_VERSION }}-${{ env.LLVM_LD_CLANGCL_ARCHIVE_SHA256 }}
-      # Only clang.exe/clang-cl.exe, their DLL dependencies, and the compiler resource dir
-      # (lib/clang/<ver>/include, needed for builtin headers like intrin.h) are extracted from the
-      # official release archive -- ~490MB, not the full ~4GB tree of every LLVM tool this repo
+          key: clangcl-v2-${{ env.LLVM_LD_CLANGCL_VERSION }}-${{ env.LLVM_LD_CLANGCL_ARCHIVE_SHA256 }}
+      # Only clang.exe/clang-cl.exe, their DLL dependencies, the compiler resource dir
+      # (lib/clang/<ver>/include, needed for builtin headers like intrin.h), and lld-link.exe (the
+      # independent linker for the nightly Tier 2 external comparison, issue #30; self-contained,
+      # no DLL imports beyond the OS) are extracted from the official release archive -- not the
+      # full ~4GB tree of every LLVM tool this repo
       # does not use. Exact member paths, not globs: portable across GNU tar and bsdtar (Windows'
       # bundled tar.exe) alike, and a directory argument recurses automatically under both.
       - name: Provision pinned clang-cl
@@ -79,6 +111,7 @@ jobs:
             "$prefix/bin/LLVM-C.dll" `
             "$prefix/bin/LTO.dll" `
             "$prefix/bin/Remarks.dll" `
+            "$prefix/bin/lld-link.exe" `
             "$prefix/lib/clang"
           Remove-Item $archive
       - name: Put pinned clang-cl on PATH
@@ -119,6 +152,21 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           ./tests/windows_manifest_merge.ps1 -BuildDir build
+      # Tier 2 corpus (issue #28): no-LTO / ThinLTO / full-LTO, stock vs wrapper, run vs run. Off
+      # pull_request (nightly and workflow_dispatch) it also links with the release lld-link.exe and
+      # compares against llvm-ld-direct (issue #30). Any difference there must be investigated with
+      # the pe_triage.py output before an exclusion is added.
+      - name: Tier 2 corpus byte-identity matrix
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $tier2 = @{ BuildDir = 'build' }
+          if ($env:GITHUB_EVENT_NAME -ne 'pull_request') {
+            $prefix = "clang+llvm-$($env:LLVM_LD_CLANGCL_VERSION)-x86_64-pc-windows-msvc"
+            $tier2.ExternalLld = "$env:LLVM_LD_CLANGCL_ROOT\$prefix\bin\lld-link.exe"
+          }
+          ./tests/tier2_corpus.ps1 @tier2
       - name: Triage gold link failure
         if: failure()
         shell: pwsh
@@ -148,3 +196,8 @@ jobs:
           path: |
             gold-*.exe
             gold-*.pdb
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: tier2-failure-artifacts
+          path: tier2-work/

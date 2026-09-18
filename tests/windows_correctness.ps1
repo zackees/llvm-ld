@@ -66,10 +66,13 @@ Assert-Same mingw-stock-1.exe mingw-library-1.exe 'MinGW stock/library'
 if ($LASTEXITCODE -ne 0) { throw "MinGW native execution failed: $LASTEXITCODE" }
 
 # Allocator-axis row: llvm-ld-runner-system.exe only exists when the build was configured with
-# -DLLVM_LD_BUILD_SYSTEM_BASELINE=ON, so its absence is a skip, not a failure.
+# -DLLVM_LD_BUILD_SYSTEM_BASELINE=ON. Locally its absence is a skip; under GitHub Actions it is a
+# failure, so a CMake change that stops building it cannot silently drop this check from CI (#29).
 $systemRunnerItem = Get-Item 'build/Release/llvm-ld-runner-system.exe' -ErrorAction SilentlyContinue
 if (-not $systemRunnerItem) { $systemRunnerItem = Get-Item 'build/llvm-ld-runner-system.exe' -ErrorAction SilentlyContinue }
-if (-not $systemRunnerItem) {
+if (-not $systemRunnerItem -and $env:GITHUB_ACTIONS -eq 'true') {
+  throw 'llvm-ld-runner-system.exe not found: CI must configure with -DLLVM_LD_BUILD_SYSTEM_BASELINE=ON and build llvm-ld-runner-system for the allocator-axis row'
+} elseif (-not $systemRunnerItem) {
   Write-Host 'llvm-ld-runner-system.exe not found (build without -DLLVM_LD_BUILD_SYSTEM_BASELINE=ON) - skipping allocator-axis comparison'
 } else {
   $systemRunner = $systemRunnerItem.FullName
@@ -82,6 +85,7 @@ if (-not $systemRunnerItem) {
     Copy-Item result.exe "allocator-axis-$side.exe"
   }
   Assert-Same allocator-axis-mimalloc.exe allocator-axis-system.exe 'allocator-axis mimalloc/system'
+  Write-Host 'allocator-axis: mimalloc and system outputs byte-identical'
 }
 
 # Re-entrancy row (item 1b) intentionally omitted: tools/runner.c's main() accepts exactly one

@@ -210,6 +210,17 @@ but means a corpus cannot be shared between machines by hash.
 
 - `tests/gold_link.ps1` / `tests/windows_correctness.ps1` require byte-identical output against
   reference `lld-link` and across build-N/build-M. Optimizations must be output-preserving.
+- `tests/tier2_corpus.ps1` (#28) is the Tier 2 matrix: a purpose-built corpus in `tests/tier2/`
+  (weak externals, COMDATs/ICF, init_seg, EH, TLS, a delay-loaded DLL, ml64, 3,000-function scale
+  TU) linked no-LTO/ThinLTO/full-LTO, twice per side, EXE/PDB/DLL/PDB/import lib byte-identical
+  stock-vs-wrapper. Nightly and on `workflow_dispatch` it also compares `llvm-ld-direct` with the
+  release `lld-link.exe` (#30) via `tools/coff_external_compare.py`. That pair is NOT fully
+  byte-identical, for a reason investigated and accepted (do not relitigate): section-contribution
+  DataCrc of empty-content chunks (BSS / zero-size) is 0 here and 0xFFFFFFFF in the release,
+  because this repo forces `LLVM_ENABLE_ZLIB=OFF` and zlib's `crc32(crc, NULL, 0)` returns 0,
+  plus the content-hash build-id fields (PDB GUID/Signature, RSDS GUID, `/Brepro` timestamps) that
+  follow from it. The comparer normalizes exactly those, verifies the hash relationships, and fails
+  on anything else, including any other CRC difference.
 - Allocator is `mimalloc-pprof` with `MI_MALLOC_OVERRIDE=1`; `tools/verify.py` enforces exactly one
   mimalloc TU. `tests/windows_allocator_benchmark.ps1` is the existing wall/CPU/RSS benchmark
   (2048-object fixture, 5 repeats, bootstrap CI) — extend it rather than writing a new harness.
