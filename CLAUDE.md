@@ -45,15 +45,16 @@ explicit path (or `rg --no-ignore`) when you actually need to read LLVM optimize
 - Corpora: `python tests/perf/gen_corpus.py --out build-perf/corpus --mode <mode> --profile
   small|medium|large` writes `build-perf/corpus/<mode>/<profile>/` (deterministic freestanding C++
   compiled by clang to MSVC COFF; no SDK needed). Build modes are `gen_corpus.MODES`: `debug`
-  (`-O0 -g`, `/debug:full /opt:noref,noicf`), `release-pdb` (`-O2 -g`, `/debug:full /opt:ref,icf`;
-  the classic perf corpus), `release-nopdb` (`-O2`, no `/debug`: a control the PDB patches cannot
-  affect) and `thinlto` (`-flto=thin`). Every function is kept live through per-TU tables called
+  (`-O0 -g`, `/opt:noref,noicf`), `release` (`-O2 -g`, `/opt:ref,icf`; the classic perf corpus)
+  and `thinlto` (`-flto=thin`). All compile with `-g`; `link.rsp` carries no `/debug`, and
+  `bench.py --variant nopdb|pdb` (`gen_corpus.VARIANTS`) adds `/debug:full` for `pdb`, so the same
+  objects are measured with and without the PDB. Every function is kept live through per-TU tables called
   from `entry` via a volatile index; without that, ThinLTO folded the program to a 2 KB EXE.
 - Baseline: build the unpatched payload once and copy `llvm-ld-direct` to `build-perf/baseline/`.
   Every candidate is gated against it: `python tests/perf/bench.py --candidate build/llvm-ld-direct
-  --baseline build-perf/baseline/llvm-ld-direct --corpus build-perf/corpus/release-pdb/large`. The
-  gate requires byte-identical EXE (and PDB, when the corpus's `manifest.json` says the mode
-  writes one) and self-determinism before it prints timings. `--json` output needs `--runs >= 4`
+  --baseline build-perf/baseline/llvm-ld-direct --corpus build-perf/corpus/release/large --variant
+  pdb`. The gate requires byte-identical EXE (and PDB, for the `pdb` variant) and self-determinism
+  before it prints timings. `--json` output needs `--runs >= 4`
   so every published cell carries interquartile ranges. It also
   prints CPU and peak-RSS deltas and warns when peak RSS regresses more than `--max-rss-regress`
   (default 5%), because a change that buys wall time with memory is a trade to make on purpose in
@@ -126,9 +127,14 @@ explicit path (or `rg --no-ignore`) when you actually need to read LLVM optimize
 
 `.github/workflows/link-benchmark.yml` republishes the charts from `main` at most once a day. The
 pattern is copied from zackees/mimalloc-pprof's `benchmark-stats` workflow. The site shows only the
-current run (#32): an overview chart (% less wall time per build mode, one bar per corpus, at the
-highest thread count) and one chart per build mode (paired stock-vs-llvm-ld time per corpus facet
-and thread count), every bar with an IQR whisker. There is no history series; do not re-add one.
+current run, as **one chart** (#35, design approved by the owner from a mockup): rows are build
+types (Debug, Release, ThinLTO), columns are corpus sizes, and each cell holds two horizontal
+stacked bars, stock lld-link (dark blue `#1f6feb`) and llvm-ld (whiter blue `#a5d6ff`), at the
+highest measured thread count. The solid segment is the link without `/debug`; the hatched,
+dotted-outline segment is the extra time `/debug:full` adds on the same objects. The legend comes
+first, above the grid. A PDB segment is drawn only if the PDB cell's q1 clears the no-PDB cell's
+q3 for both linkers; otherwise the cell says "PDB cost within noise". Debug and Release share an
+ms axis per column; the LTO row has its own. There is no history series; do not re-add one.
 The measurement matrix comes from `gen_corpus.py --print-matrix`, never from hand-written loops:
 ThinLTO is `small` only at the highest thread count with `lto_runs` (5) samples, because one
 medium ThinLTO link takes ~2 minutes even on 16 cores.
@@ -140,11 +146,11 @@ a minute instead of a full measurement; pass `force: true` to measure anyway. Re
 unchanged commit would only add runner noise to the published numbers.
 
 - The site is a flat directory of exactly `SITE_FILES` (`tools/bench_report.py`): `.nojekyll`,
-  `index.html`, `latest.json`, `manifest.json`, and `link-speed-overview-dark.svg` plus
-  `link-speed-<mode>-dark.svg` per mode. The SVG entries are derived from
-  `gen_corpus.MODES`, which `bench_report.py` imports, so adding a mode adds its panels; any other
-  file must be added to `SITE_FILES`, `FILE_CAPS`, `MEDIA_TYPES` and `ROLES`, or validation fails
-  both ways (missing *and* unexpected files are errors). Render fails if any mode has no cells.
+  `index.html`, `latest.json`, `manifest.json` and the one chart, `link-speed-overview-dark.svg`
+  (the name the README has hotlinked since #33, kept so merges never break the README image).
+  Any other file must be added to `SITE_FILES`, `FILE_CAPS`, `MEDIA_TYPES` and `ROLES`, or
+  validation fails both ways (missing *and* unexpected files are errors). Render fails if any mode
+  has no cells or any (mode, corpus, threads) point lacks one of the two variants.
 - It is sealed by `manifest.json` (path/size/sha256/media type/role per file) plus a detached
   `manifest.sha256` written *outside* the site tree. `validate_site` is the chokepoint and is
   called by render, prepare-branch, validate-revision and audit-pages, and again from a separate
@@ -153,12 +159,10 @@ unchanged commit would only add runner noise to the published numbers.
   read at the start of the run; the branch carries no accumulated history. The README hotlinks the
   SVGs off that branch by
   *branch name*, never a commit SHA, so GitHub's camo proxy revalidates when the blob changes.
-- Panels are hand-written SVG, stdlib only, fixed-pixel layout, one dark theme (`PALETTES`) copied from
-  zackees/mimalloc-pprof's `SCALING_INK`/`SCALING_SERIES` (llvm-ld blue `#58a6ff`, stock lld the
-  upstream green `#3fb950`), and
-  the README embeds the dark files directly in either GitHub theme (decided; the light variants
-  were removed on request). The `-dark` suffix is kept so published URLs never change. The
-  dashboard page is dark too. `validate_html_links` still checks any `srcset`. `validate_svg`
+- The chart is hand-written SVG, stdlib only, fixed-pixel layout, one dark theme: surfaces and
+  text from zackees/mimalloc-pprof's `SCALING_INK`, bar colors as above (both owner decisions).
+  The README embeds it directly in either GitHub theme; the dashboard page is dark too. The hatch
+  is an SVG `<pattern>`, which needs no href. `validate_html_links` still checks any `srcset`. `validate_svg`
   requires a `viewBox` and forbids script, `foreignObject`, `xlink:href`, `<image>`, `@import`,
   inline event handlers and any non-w3.org URL: they are hotlinked into a README and must be
   inert. `index.html` may link out but never *load* out, and every `<img>` needs alt text.
