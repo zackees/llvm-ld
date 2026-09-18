@@ -82,7 +82,9 @@ explicit path (or `rg --no-ignore`) when you actually need to read LLVM optimize
 - Things already done (Sep 2026): parallel PDB symbol-merging analysis, parallel section-
   contribution CRCs, PROCREF pre-serialization, parallel publics collection + serialization,
   batched GSI writes, deferred parallel `.debug$S` flag scan, slice-by-8 CRC-32, cwd caching in
-  `pdbMakeAbsolute`. Result: +46% wall at default threads, +17% at `/threads:1`, on 2048 objects.
+  `pdbMakeAbsolute`. Result: +46% wall at default threads (`/threads:16`) on a 16-thread local
+  machine, +17% at `/threads:1`, on 2048 objects. The hosted-runner dashboard caps at 4 threads
+  (see below), so it will show a smaller figure.
 - Remaining hot spots on the large corpus (default threads), all investigated under #15 and
   judged not worth a payload patch: the PDB output buffer `commit()` (~100 ms, kernel writeback
   when a 115 MB dirty mapping is unmapped — I/O bound), `Read input files` (~130 ms, but on Linux
@@ -175,9 +177,22 @@ is future work tracked under #20; build-tree caching is #21 (blocked on
 ### What the numbers mean, and the trap they avoid
 
 Each cell is a paired A/B in one run on one machine: the current linker against a baseline built
-by checking out the six link-speed payload files at `BASELINE_REF` and rebuilding incrementally
-(~40s), then linking the same corpus interleaved. Absolute wall time across runs is deliberately
-not published because hosted runners are shared; see the measurement traps above.
+by checking out the link-speed payload files (six today) at `BASELINE_REF` and rebuilding
+incrementally (about 40 s on a 16-thread local machine, 1.6-1.8 min on the hosted runner), then
+linking the same corpus interleaved. Absolute wall time across runs is deliberately not published
+because hosted runners are shared; see the measurement traps above.
+
+A few scope notes specific to this workflow:
+
+- Thread counts: the workflow measures 1, 2 and 4 threads, plus `nproc` when it is larger than 4,
+  deduplicated. Before this fix, t4 was measured twice on 4-core runners.
+- Baseline skips: the baseline step skips, with a `::warning::`, any file in the current
+  `provenance/payload-prune.json` link-speed set that does not exist at `BASELINE_REF`, and fails
+  only if none remain.
+- Allocator: the Linux benchmark binary uses glibc malloc (`MI_MALLOC_OVERRIDE` is WIN32-only for
+  `llvm-ld-direct` in `CMakeLists.txt`), unlike the shipped DLL; this is disclosed on the
+  dashboard and in the README, and it is deliberately left unchanged.
+- Platform transfer: the Linux-to-Windows transfer of the ratio is unmeasured.
 
 A trap specific to this setup, which cost a full measurement round: after restoring the payload
 files you **must rebuild**, or the candidate binary silently *is* the baseline and every number
@@ -197,6 +212,8 @@ but means a corpus cannot be shared between machines by hash.
 - Allocator is `mimalloc-pprof` with `MI_MALLOC_OVERRIDE=1`; `tools/verify.py` enforces exactly one
   mimalloc TU. `tests/windows_allocator_benchmark.ps1` is the existing wall/CPU/RSS benchmark
   (2048-object fixture, 5 repeats, bootstrap CI) — extend it rather than writing a new harness.
+  This override applies to Windows builds only, so the Linux `llvm-ld-direct` used by
+  `tests/perf/bench.py` and the `link-benchmark` workflow runs on glibc malloc.
 
 ## Build
 

@@ -25,8 +25,23 @@ runs is deliberately not published — a paired ratio is what survives that nois
 gated on byte-identical output: `tests/perf/bench.py` refuses to report a timing unless the
 candidate's EXE and PDB match the baseline's exactly and both are self-deterministic.
 
-Measured on Linux; the shipping target is Windows, so the relative speedup is what transfers, not
-the absolute times. The underlying data is on the [`benchmark-stats` branch](https://github.com/zackees/llvm-ld/tree/benchmark-stats)
+**Scope and caveats**
+
+- Thread cap: the workflow measures 1, 2 and 4 threads, plus the runner's core count when that is
+  larger than 4. The hosted `ubuntu-24.04` runner has 4 cores, so the history panel's "highest
+  measured thread count" is 4 there. The +46% headline was measured at 16 threads on a local workstation, and the
+  published panels do not show that regime.
+- Allocator: on Linux the benchmarked `llvm-ld-direct` allocates through glibc malloc, because
+  `MI_MALLOC_OVERRIDE` is defined only under `if(WIN32)` in `CMakeLists.txt`. The shipped Windows
+  DLL allocates through mimalloc. These are parallelisation patches, and contention behaviour
+  differs between glibc arenas and mimalloc.
+- Platform transfer: the numbers are measured on Linux and the shipping target is Windows. That
+  the relative speedup carries over to Windows is asserted, not measured. One known divergence
+  sits in an optimised phase: `createFutureForFile` is `std::launch::deferred` on Linux and
+  `std::launch::async` under `_WIN64`. A Windows measurement of the same paired ratio is still to
+  be done (see issue #23).
+
+The underlying data is on the [`benchmark-stats` branch](https://github.com/zackees/llvm-ld/tree/benchmark-stats)
 (`latest.json`, `history.jsonl`) and on the [dashboard](https://zackees.github.io/llvm-ld/).
 
 ## Building
