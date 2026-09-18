@@ -30,6 +30,20 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from materialize_llvm_payload import is_pruned  # noqa: E402
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
+SHIMS = REPO / "cmake" / "find-shims"
+
+
+def shadowed_modules() -> set[str]:
+    """Upstream CMake modules that must stay out of the discovery tree.
+
+    llvm-ld shims some find modules (cmake/find-shims/) so LLVM uses its vendored copies, and the
+    shim only wins because the upstream module of the same name is absent from the payload. LLVM
+    prepends llvm/cmake/modules to CMAKE_MODULE_PATH, so an upstream copy in the discovery tree
+    would shadow the shim and configure a different build than production: FindLibXml2.cmake makes
+    configure look for a *system* libxml2 instead of the vendored one. Discovery must build what
+    production builds, so these are excluded.
+    """
+    return {f"llvm/cmake/modules/{path.name}" for path in SHIMS.glob("*.cmake")}
 
 
 def prepare(upstream: pathlib.Path, output: pathlib.Path, prune_path: pathlib.Path, patched_source: pathlib.Path) -> int:
@@ -48,6 +62,7 @@ def prepare(upstream: pathlib.Path, output: pathlib.Path, prune_path: pathlib.Pa
     staging = output.with_name(output.name + ".discovery-tmp")
     if staging.exists():
         shutil.rmtree(staging)
+    excluded = shadowed_modules()
     copied = 0
     for top in ("llvm", "lld", "libc", "cmake", "third-party"):
         base = upstream / top
@@ -57,7 +72,7 @@ def prepare(upstream: pathlib.Path, output: pathlib.Path, prune_path: pathlib.Pa
             if not path.is_file():
                 continue
             relative = path.relative_to(upstream).as_posix()
-            if is_pruned(relative, prune, keep):
+            if is_pruned(relative, prune, keep) or relative in excluded:
                 continue
             target = staging / relative
             target.parent.mkdir(parents=True, exist_ok=True)
