@@ -115,11 +115,12 @@ jobs:
 
   measure:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 240
     needs: precheck
     if: needs.precheck.outputs.should_run == 'true'
     permissions:
       contents: read
+      actions: read
     outputs:
       publish_eligible: ${{ steps.eligibility.outputs.publish_eligible }}
       prior_branch_sha: ${{ steps.history.outputs.prior_sha }}
@@ -130,7 +131,96 @@ jobs:
           # lacks BASELINE_REF would silently make this unmeasurable.
           fetch-depth: 0
           persist-credentials: false
+
+      # ci.yml's build-linux job builds llvm-ld-direct plus this workflow's
+      # baseline on every push to main and uploads both as
+      # `llvm-ld-bench-bins-<sha>` (90-day retention), so the common path
+      # compiles nothing here (#20). If no such artifact exists for
+      # github.sha (e.g. ci.yml has not reached it yet, or a dispatch on a
+      # non-main ref) or anything recorded in it disagrees with this
+      # workflow, fall back to building in-job.
+      - name: fetch prebuilt linkers from ci.yml
+        id: prebuilt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          FOUND=false
+          SRC_RUN=""
+          NAME="llvm-ld-bench-bins-${GITHUB_SHA}"
+          DL="$RUNNER_TEMP/prebuilt"
+          RUN_IDS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml \
+            --commit "$GITHUB_SHA" --event push --limit 20 \
+            --json databaseId --jq '.[].databaseId' || true)
+          for id in $RUN_IDS; do
+            rm -rf "$DL"
+            if ! gh run download "$id" --repo "$GITHUB_REPOSITORY" --name "$NAME" --dir "$DL"; then
+              continue
+            fi
+            if [ ! -f "$DL/candidate" ] || [ ! -f "$DL/baseline" ]; then
+              echo "::warning::run $id's $NAME artifact is missing candidate or baseline"
+              continue
+            fi
+            # This derivation must stay identical to the one in the baseline
+            # build step below: same file, same filter, same ordering.
+            EXPECT_FILES=$(python3 -c "
+          import json
+          d = json.load(open('provenance/payload-prune.json'))
+          print(' '.join('llvm-project/' + e['path'] for e in d['patched'] if 'link-speed' in e['reason']))
+          ")
+            if BENCH_BINS_PATH="$DL/bench-bins.json" \
+               EXPECT_SOURCE_SHA="$GITHUB_SHA" \
+               EXPECT_BASELINE_REF="$BASELINE_REF" \
+               EXPECT_FILES="$EXPECT_FILES" \
+               EXPECT_COMPILER="$(clang --version | head -1)" \
+               python3 -c "
+          import json, os, sys
+
+          path = os.environ['BENCH_BINS_PATH']
+          try:
+              with open(path) as f:
+                  data = json.load(f)
+          except (OSError, ValueError) as exc:
+              print('::warning::could not read %s: %s' % (path, exc))
+              sys.exit(1)
+
+          expect_files = os.environ['EXPECT_FILES'].split()
+
+          checks = [
+              ('source_sha', data.get('source_sha'), os.environ['EXPECT_SOURCE_SHA']),
+              ('baseline_ref', data.get('baseline_ref'), os.environ['EXPECT_BASELINE_REF']),
+              ('files', data.get('files'), expect_files),
+              ('compiler', data.get('compiler'), os.environ['EXPECT_COMPILER']),
+          ]
+          ok = True
+          for name, got, want in checks:
+              if got != want:
+                  print('::warning::bench-bins.json %s mismatch: got %r, want %r' % (name, got, want))
+                  ok = False
+          sys.exit(0 if ok else 1)
+          "; then
+              # Artifacts do not preserve the executable bit, so it has to be
+              # restored here.
+              mkdir -p "$RUNNER_TEMP/bin"
+              cp "$DL/candidate" "$RUNNER_TEMP/bin/candidate"
+              cp "$DL/baseline" "$RUNNER_TEMP/bin/baseline"
+              chmod +x "$RUNNER_TEMP/bin/candidate" "$RUNNER_TEMP/bin/baseline"
+              FOUND=true
+              SRC_RUN=$id
+              break
+            fi
+          done
+          echo "found=$FOUND" >> "$GITHUB_OUTPUT"
+          if [ "$FOUND" = "true" ]; then
+            echo "linkers: prebuilt by ci.yml run $SRC_RUN (${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/$SRC_RUN)" \
+              >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "linkers: no usable ci.yml artifact for $GITHUB_SHA; built in-job" \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - uses: mozilla-actions/sccache-action@v0.0.11
+        if: steps.prebuilt.outputs.found != 'true'
 
       - name: resolve prior publication
         id: history
@@ -168,7 +258,16 @@ jobs:
       # LLVM_APPEND_VC_REV=OFF: with it ON, LLVM stamps the git revision into
       # VCSRevision.h, so every commit changes LLVMSupport, which both defeats
       # byte-identity comparisons and poisons the compiler cache.
+      # The compiler and flags here must match ci.yml's build-linux job,
+      # because the common path (prebuilt found above) benchmarks that job's
+      # binaries.
       - name: build the candidate linker
+        if: steps.prebuilt.outputs.found != 'true'
+        env:
+          # Every other workflow sets this; without it sccache uses an empty
+          # local disk cache, and with the compiler now aligned to ci.yml
+          # (clang) the fallback can hit ci.yml build-linux's warm cache.
+          SCCACHE_GHA_ENABLED: "true"
         run: |
           set -euo pipefail
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
@@ -183,6 +282,12 @@ jobs:
       # revision. The build tree is otherwise untouched, so this is a handful of
       # translation units and a relink.
       - name: build the baseline linker
+        if: steps.prebuilt.outputs.found != 'true'
+        env:
+          # Every other workflow sets this; without it sccache uses an empty
+          # local disk cache, and with the compiler now aligned to ci.yml
+          # (clang) the fallback can hit ci.yml build-linux's warm cache.
+          SCCACHE_GHA_ENABLED: "true"
         run: |
           set -euo pipefail
           FILES=$(python3 -c "
@@ -196,9 +301,17 @@ jobs:
           cmake --build build --target llvm-ld-direct
           cp build/llvm-ld-direct "$RUNNER_TEMP/bin/baseline"
           git checkout HEAD -- $FILES
-          cmake --build build --target llvm-ld-direct
-          # The guard in bench.py would catch this too, but failing here points
-          # at the real cause instead of at the measurement.
+          # The candidate was copied aside before the swap and nothing
+          # downstream reads the build tree, so rebuilding the candidate here
+          # was dead work (this folds in the one substantive change from
+          # PR #18).
+
+      # The guard in bench.py would catch this too, but failing here points
+      # at the real cause instead of at the measurement. Unconditional so it
+      # guards the prebuilt path as well as the fallback build above.
+      - name: "guard: baseline and candidate differ"
+        run: |
+          set -euo pipefail
           if cmp -s "$RUNNER_TEMP/bin/candidate" "$RUNNER_TEMP/bin/baseline"; then
             echo "::error::baseline and candidate are the same binary; the payload has no link-speed delta"
             exit 1

@@ -42,7 +42,16 @@ jobs:
       # LLVM_APPEND_VC_REV=OFF everywhere below: with it ON, LLVM stamps the git revision into the
       # generated VCSRevision.h, so every commit changes LLVMSupport and therefore llvm_ld.dll -
       # which defeats byte-identity comparisons across commits and poisons the compiler caches.
-      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_APPEND_VC_REV=OFF -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace.jsonl
+      #
+      # clang, not the image default (gcc on ubuntu-24.04 today): link-benchmark.yml builds and
+      # reports clang (its runner metadata records clang --version and its corpora are clang
+      # output), and it now reuses this job's llvm-ld-direct, so the benchmarked binary must come
+      # from the same compiler and flags. Compile caches key on the compiler binary, so one
+      # compiler also lets link-benchmark's fallback build hit this job's warm sccache instead of
+      # the two workflows competing for the 10 GB cache budget. An explicit compiler also cannot
+      # drift silently when the runner image changes its default. The first clang run of this job
+      # is a one-time cold sccache.
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_APPEND_VC_REV=OFF -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace.jsonl
       - run: cmake --build build --target llvm_ld abi_smoke abi_contract abi_state_test allocator-probe llvm-ld-runner llvm-ld-direct
       - name: sccache stats
         if: always()
@@ -63,6 +72,64 @@ jobs:
           printf 'llvm_ld_abi_version\nllvm_ld_allocator_get_info\nllvm_ld_invoke\nllvm_ld_profiler_start\nllvm_ld_profiler_stop\n' > expected-exports.txt
           diff -u expected-exports.txt actual-exports.txt
       - run: ctest --test-dir build --output-on-failure
+      - name: build the link-benchmark baseline linker (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          # Must equal BASELINE_REF in .github/workflows/link-benchmark.yml. link-benchmark
+          # verifies the recorded value and falls back to building in-job on any mismatch.
+          BASELINE_REF: f9cdd65cbfb5f64654ce428524a8126652bed8a7
+        run: |
+          set -euo pipefail
+          # Mirrors link-benchmark.yml's baseline build: the link-speed files from
+          # provenance/payload-prune.json checked out at BASELINE_REF, then an incremental
+          # rebuild. The FILES derivation must stay identical to link-benchmark's.
+          OUT="$RUNNER_TEMP/bench-bins"
+          mkdir -p "$OUT"
+          # Copy the candidate before any payload file changes.
+          cp build/llvm-ld-direct "$OUT/candidate"
+          FILES=$(python3 -c "
+          import json
+          d = json.load(open('provenance/payload-prune.json'))
+          print(' '.join('llvm-project/' + e['path'] for e in d['patched'] if 'link-speed' in e['reason']))
+          ")
+          test -n "$FILES"
+          echo "baseline files: $FILES"
+          read -r -a FILE_LIST <<< "$FILES"
+          git checkout "$BASELINE_REF" -- "${FILE_LIST[@]}"
+          cmake --build build --target llvm-ld-direct
+          cp build/llvm-ld-direct "$OUT/baseline"
+          # Restore the worktree. Deliberately no third rebuild: the candidate was copied
+          # first and nothing later reads the build tree.
+          git checkout HEAD -- "${FILE_LIST[@]}"
+          if cmp -s "$OUT/candidate" "$OUT/baseline"; then
+            echo "::error::baseline and candidate are the same binary; the payload has no link-speed delta"
+            exit 1
+          fi
+          export OUT
+          export BENCH_SOURCE_SHA="$GITHUB_SHA"
+          export BENCH_BASELINE_REF="$BASELINE_REF"
+          export BENCH_FILES="$FILES"
+          BENCH_COMPILER="$(clang --version | head -1)"
+          export BENCH_COMPILER
+          export BENCH_RUN_ID="$GITHUB_RUN_ID"
+          python3 -c "
+          import json, os
+          json.dump({
+              'source_sha': os.environ['BENCH_SOURCE_SHA'],
+              'baseline_ref': os.environ['BENCH_BASELINE_REF'],
+              'files': os.environ['BENCH_FILES'].split(),
+              'compiler': os.environ['BENCH_COMPILER'],
+              'run_id': os.environ['BENCH_RUN_ID'],
+          }, open(os.path.join(os.environ['OUT'], 'bench-bins.json'), 'w'), sort_keys=True)
+          "
+      # Consumed by link-benchmark.yml, which looks the artifact up by this exact name for github.sha.
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          name: llvm-ld-bench-bins-${{ github.sha }}
+          path: ${{ runner.temp }}/bench-bins/
+          if-no-files-found: error
+          retention-days: 90
   build-linux-cross:
     runs-on: ubuntu-24.04
     env:
