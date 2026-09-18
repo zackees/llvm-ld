@@ -134,16 +134,17 @@ class BenchReportRenderTest(unittest.TestCase):
             site = tmp / "site"
             names = {path.name for path in site.iterdir()}
             self.assertEqual(names, REPORT.SITE_FILES)
-            self.assertEqual(len(REPORT.SVG_FILES), 2 * (1 + len(GEN.MODES)))
+            self.assertEqual(len(REPORT.SVG_FILES), 1 + len(GEN.MODES))
+            self.assertFalse(any("light" in name for name in names))
             self.assertFalse(any("history" in name for name in names))
 
             for mode, spec in GEN.MODES.items():
-                for theme in ("light", "dark"):
+                for theme in ("dark",):
                     svg = (site / f"link-speed-{mode}-{theme}.svg").read_text(encoding="utf-8")
                     self.assertIn(" ".join(spec["link_flags"]), svg)
                     self.assertIn(REPORT.escaped(spec["note"]), svg)
                     self.assertIn("<title>", svg)
-            overview = (site / "link-speed-overview-light.svg").read_text(encoding="utf-8")
+            overview = (site / "link-speed-overview-dark.svg").read_text(encoding="utf-8")
             self.assertIn("medium, large not measured", overview)
             self.assertIn("-1.5%", overview)
             thinlto = (site / "link-speed-thinlto-dark.svg").read_text(encoding="utf-8")
@@ -151,7 +152,7 @@ class BenchReportRenderTest(unittest.TestCase):
 
             index_html = (site / "index.html").read_text(encoding="utf-8")
             for expected in (
-                "<picture>", "prefers-color-scheme", "glibc", "MI_MALLOC_OVERRIDE", "16 threads",
+                "link-speed-overview-dark.svg", "background:#0d1117", "glibc", "MI_MALLOC_OVERRIDE", "16 threads",
                 "asserted, not measured", "Thread counts measured this run: 1, 2, 4",
                 'id="release-nopdb"', "none",
             ):
@@ -221,7 +222,7 @@ class BenchReportRejectsTest(unittest.TestCase):
             index = tmp / "site" / "index.html"
             index.write_text(
                 index.read_text(encoding="utf-8").replace(
-                    'srcset="link-speed-overview-dark.svg"', 'srcset="https://example.com/x.svg"'
+                    "</body>", '<picture><source srcset="https://example.com/x.svg"></picture></body>'
                 ),
                 encoding="utf-8",
             )

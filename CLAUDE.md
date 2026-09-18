@@ -140,8 +140,8 @@ a minute instead of a full measurement; pass `force: true` to measure anyway. Re
 unchanged commit would only add runner noise to the published numbers.
 
 - The site is a flat directory of exactly `SITE_FILES` (`tools/bench_report.py`): `.nojekyll`,
-  `index.html`, `latest.json`, `manifest.json`, and `link-speed-overview-{light,dark}.svg` plus
-  `link-speed-<mode>-{light,dark}.svg` per mode. The SVG entries are derived from
+  `index.html`, `latest.json`, `manifest.json`, and `link-speed-overview-dark.svg` plus
+  `link-speed-<mode>-dark.svg` per mode. The SVG entries are derived from
   `gen_corpus.MODES`, which `bench_report.py` imports, so adding a mode adds its panels; any other
   file must be added to `SITE_FILES`, `FILE_CAPS`, `MEDIA_TYPES` and `ROLES`, or validation fails
   both ways (missing *and* unexpected files are errors). Render fails if any mode has no cells.
@@ -153,9 +153,12 @@ unchanged commit would only add runner noise to the published numbers.
   read at the start of the run; the branch carries no accumulated history. The README hotlinks the
   SVGs off that branch by
   *branch name*, never a commit SHA, so GitHub's camo proxy revalidates when the blob changes.
-- Panels are hand-written SVG, stdlib only, fixed-pixel layout, rendered twice (light and dark
-  palettes, `PALETTES`) and embedded with `<picture>`/`prefers-color-scheme`; a media query inside
-  an `<img>`-embedded SVG is not reliable. `validate_html_links` checks `srcset` too. `validate_svg`
+- Panels are hand-written SVG, stdlib only, fixed-pixel layout, one dark theme (`PALETTES`) copied from
+  zackees/mimalloc-pprof's `SCALING_INK`/`SCALING_SERIES` (llvm-ld blue `#58a6ff`, stock lld the
+  upstream green `#3fb950`), and
+  the README embeds the dark files directly in either GitHub theme (decided; the light variants
+  were removed on request). The `-dark` suffix is kept so published URLs never change. The
+  dashboard page is dark too. `validate_html_links` still checks any `srcset`. `validate_svg`
   requires a `viewBox` and forbids script, `foreignObject`, `xlink:href`, `<image>`, `@import`,
   inline event handlers and any non-w3.org URL: they are hotlinked into a README and must be
   inert. `index.html` may link out but never *load* out, and every `<img>` needs alt text.
