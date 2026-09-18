@@ -31,7 +31,7 @@ What is measured is chosen per build mode (Debug + PDB, Release + PDB, Release
 without a PDB as a control, ThinLTO + PDB), defined once in
 tests/perf/gen_corpus.py:MODES and imported here. The site shows only the
 current run: an overview chart comparing the modes and one paired-time chart
-per mode, each in a light and a dark variant.
+per mode, all in one dark theme.
 
 Subcommands
   render            build the sealed site from measurement cells
@@ -97,7 +97,9 @@ CORPUS_LABELS = {
     corpus: f"{corpus} · {_GENERATOR.PROFILES[corpus]['tus']} objects" for corpus in CORPUS_IDS
 }
 
-THEMES = ("light", "dark")
+# One dark theme, always (the README shows the dark charts in either GitHub
+# theme). The "-dark" file-name suffix is kept so published URLs stay stable.
+THEMES = ("dark",)
 
 
 def overview_panel_name(theme: str) -> str:
@@ -198,10 +200,7 @@ def git_command(repository: Path, *args: str) -> bytes:
 
 # ------------------------------------------------------------ SVG rendering
 #
-# Hand-written SVG, fixed pixel layout, one light and one dark variant of every
-# panel. The README embeds them with <picture>/prefers-color-scheme, which is
-# GitHub's documented mechanism; a media query inside an <img>-embedded SVG is
-# not reliable across browsers. The panels are hotlinked from the raw
+# Hand-written SVG, fixed pixel layout, one dark theme. The panels are hotlinked from the raw
 # data-branch URL, so they must carry no script, no external reference and no
 # event handler; validate_svg enforces it.
 #
@@ -209,26 +208,23 @@ def git_command(repository: Path, *args: str) -> bytes:
 # labels are the only value channel in the README. The dashboard table is the
 # accessible twin.
 
+# The dark panel palette of zackees/mimalloc-pprof (ci/benchmark_report.py,
+# SCALING_INK / SCALING_SERIES), so both projects' charts read as one system.
+# There, the project's own allocator is blue and upstream mimalloc is green;
+# here llvm-ld is the same blue and stock (upstream) lld-link the same green.
+# Corpus size is ordinal, so the overview uses a light-to-dark ramp around
+# that blue.
 PALETTES = {
-    "light": {
-        "background": "#ffffff",
-        "plot": "#f6f8fa",
-        "grid": "#d0d7de",
-        "title": "#1f2328",
-        "muted": "#59636e",
-        "baseline": "#7a7a76",
-        "candidate": "#2a78d6",
-        "ramp": ("#86b6ef", "#3987e5", "#1c5cab"),
-    },
     "dark": {
         "background": "#0d1117",
-        "plot": "#161b22",
-        "grid": "#30363d",
-        "title": "#e6edf3",
-        "muted": "#8b949e",
-        "baseline": "#6e7681",
-        "candidate": "#3987e5",
-        "ramp": ("#9ec5f4", "#5598e7", "#256abf"),
+        "plot": "#111823",
+        "grid": "#1f2937",
+        "axis": "#8b98ad",
+        "title": "#e8eef7",
+        "muted": "#7d8da5",
+        "baseline": "#3fb950",
+        "candidate": "#58a6ff",
+        "ramp": ("#a5d6ff", "#58a6ff", "#1f6feb"),
     },
 }
 
@@ -445,7 +441,7 @@ def overview_panel_svg(latest: dict, theme: str) -> bytes:
             f'<line x1="{left:.1f}" y1="{y:.1f}" x2="{left + plot_width:.1f}" y2="{y:.1f}" '
             f'stroke="{ink["grid"]}" stroke-width="1"/>'
         )
-        parts.append(svg_text(left - 10, y + 4, f"{value:g}%", fill=ink["muted"], size=12, anchor="end"))
+        parts.append(svg_text(left - 10, y + 4, f"{value:g}%", fill=ink["axis"], size=12, anchor="end"))
     zero = y_of(0.0)
     parts.append(
         f'<line x1="{left:.1f}" y1="{zero:.1f}" x2="{left + plot_width:.1f}" y2="{zero:.1f}" '
@@ -557,7 +553,7 @@ def mode_panel_svg(latest: dict, mode: str, theme: str) -> bytes:
                 f'<line x1="{axis_left:.1f}" y1="{y:.1f}" x2="{axis_left + plot_width:.1f}" '
                 f'y2="{y:.1f}" stroke="{ink["grid"]}" stroke-width="1"/>'
             )
-            parts.append(svg_text(axis_left - 6, y + 4, fmt_axis_ms(value), fill=ink["muted"], size=11, anchor="end"))
+            parts.append(svg_text(axis_left - 6, y + 4, fmt_axis_ms(value), fill=ink["axis"], size=11, anchor="end"))
         slot = plot_width / len(facet_cells)
         for position, cell in enumerate(facet_cells):
             centre = axis_left + slot * (position + 0.5)
@@ -859,11 +855,7 @@ def load_cells(cells_dir: Path) -> list[dict]:
 
 
 def picture(stem: str, alt: str) -> str:
-    """Light/dark variants, switched by the viewer's color scheme."""
-    return (
-        f'<picture><source media="(prefers-color-scheme: dark)" srcset="{stem}-dark.svg">'
-        f'<img src="{stem}-light.svg" alt="{escaped(alt)}"></picture>'
-    )
+    return f'<img src="{stem}-dark.svg" alt="{escaped(alt)}">'
 
 
 def render_html(latest: dict) -> bytes:
@@ -953,10 +945,9 @@ def render_html(latest: dict) -> bytes:
     document = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>llvm-ld link speed</title>
-<style>body{{font:15px {FONT_STACK};max-width:1100px;margin:auto;padding:24px;color:#1f2328;background:#ffffff}}
-table{{border-collapse:collapse;width:100%;margin:16px 0;font-size:13px}}th,td{{border:1px solid #d0d7de;padding:6px;text-align:left}}
-img{{max-width:100%;height:auto}}code,pre{{overflow-wrap:anywhere;white-space:pre-wrap}}a{{color:#0969da}}
-@media (prefers-color-scheme: dark){{body{{color:#e6edf3;background:#0d1117}}th,td{{border-color:#30363d}}a{{color:#4493f8}}}}</style>
+<style>body{{font:15px {FONT_STACK};max-width:1100px;margin:auto;padding:24px;color:#e6edf3;background:#0d1117}}
+table{{border-collapse:collapse;width:100%;margin:16px 0;font-size:13px}}th,td{{border:1px solid #30363d;padding:6px;text-align:left}}
+img{{max-width:100%;height:auto}}code,pre{{overflow-wrap:anywhere;white-space:pre-wrap}}a{{color:#4493f8}}</style>
 </head><body>
 <h1>llvm-ld link speed</h1>
 <p>How much faster llvm-ld links each kind of build, right now. Every number is

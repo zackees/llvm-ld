@@ -16,10 +16,7 @@ so every build mode is measured and charted separately. The charts show the curr
 the `link-benchmark` workflow republishes them at most once a day, and only when the commit has
 moved.
 
-<a href="https://zackees.github.io/llvm-ld/#overview"><picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-overview-dark.svg">
-  <img alt="Percent less link wall time with llvm-ld per build mode and corpus size, at the highest measured thread count" src="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-overview-light.svg">
-</picture></a>
+<a href="https://zackees.github.io/llvm-ld/#overview"><img alt="Percent less link wall time with llvm-ld per build mode and corpus size, at the highest measured thread count" src="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-overview-dark.svg"></a>
 
 Each bar is a paired A/B measured in a single run on a single machine: the current linker against
 a baseline built from the payload as it stood before the link-speed patches, linking the same
@@ -30,36 +27,24 @@ writes one) match the baseline's exactly and both are self-deterministic.
 
 ### By build mode
 
-Paired link time per corpus (64, 512 and 2048 objects) and thread count; stock `lld-link` in gray,
+Paired link time per corpus (64, 512 and 2048 objects) and thread count; stock `lld-link` in green,
 llvm-ld in blue.
 
 **Debug + PDB**: objects `clang -O0 -g -gcodeview`, link `/debug:full /opt:noref /opt:noicf`.
 
-<a href="https://zackees.github.io/llvm-ld/#debug"><picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-debug-dark.svg">
-  <img alt="Debug + PDB: paired link time, stock lld-link vs llvm-ld, per corpus and thread count" src="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-debug-light.svg">
-</picture></a>
+<a href="https://zackees.github.io/llvm-ld/#debug"><img alt="Debug + PDB: paired link time, stock lld-link vs llvm-ld, per corpus and thread count" src="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-debug-dark.svg"></a>
 
 **Release + PDB**: objects `clang -O2 -g -gcodeview`, link `/debug:full /opt:ref /opt:icf`.
 
-<a href="https://zackees.github.io/llvm-ld/#release-pdb"><picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-release-pdb-dark.svg">
-  <img alt="Release + PDB: paired link time, stock lld-link vs llvm-ld, per corpus and thread count" src="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-release-pdb-light.svg">
-</picture></a>
+<a href="https://zackees.github.io/llvm-ld/#release-pdb"><img alt="Release + PDB: paired link time, stock lld-link vs llvm-ld, per corpus and thread count" src="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-release-pdb-dark.svg"></a>
 
 **Release, no PDB (control)**: objects `clang -O2`, link `/opt:ref /opt:icf`; no PDB is written, so the PDB-emission patches cannot apply and ~0% is the expected result.
 
-<a href="https://zackees.github.io/llvm-ld/#release-nopdb"><picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-release-nopdb-dark.svg">
-  <img alt="Release, no PDB (control): paired link time, stock lld-link vs llvm-ld, per corpus and thread count" src="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-release-nopdb-light.svg">
-</picture></a>
+<a href="https://zackees.github.io/llvm-ld/#release-nopdb"><img alt="Release, no PDB (control): paired link time, stock lld-link vs llvm-ld, per corpus and thread count" src="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-release-nopdb-dark.svg"></a>
 
 **ThinLTO + PDB**: objects `clang -O2 -g -gcodeview -flto=thin`, link `/debug:full /opt:ref /opt:icf`; the link runs LLVM codegen, which the patches do not touch.
 
-<a href="https://zackees.github.io/llvm-ld/#thinlto"><picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-thinlto-dark.svg">
-  <img alt="ThinLTO + PDB: paired link time, stock lld-link vs llvm-ld, per corpus and thread count" src="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-thinlto-light.svg">
-</picture></a>
+<a href="https://zackees.github.io/llvm-ld/#thinlto"><img alt="ThinLTO + PDB: paired link time, stock lld-link vs llvm-ld, per corpus and thread count" src="https://raw.githubusercontent.com/zackees/llvm-ld/benchmark-stats/link-speed-thinlto-dark.svg"></a>
 
 **Scope and caveats**
 
