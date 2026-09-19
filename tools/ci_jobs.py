@@ -714,7 +714,7 @@ def job_release_build(args: argparse.Namespace) -> None:
         release_build_in_alpine(common)
         return
 
-    sh([PY, *common, "--launcher", launcher_or_none()])
+    sh([PY, *common, "--launcher", launcher_or_none("clang-cl" if kind == "windows" else "clang++")])
 
 
 def release_build_in_alpine(common: list[str]) -> None:
