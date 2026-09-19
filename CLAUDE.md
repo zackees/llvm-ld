@@ -209,8 +209,8 @@ peak thread count, noisy cells skipped) and at most 14 of ~38 noisy cells on eve
 measured 0 noisy cells and the next 9 on the same commit, so the count only catches a run that is
 mostly noise. The `floors` job
 runs after publish/deploy with `if: always()`, so a violation fails the workflow at the end but
-never stops the charts from updating. Raise a floor only with evidence from several runs. `ci.yml`'s `build-linux` job, on push to
-`main` only (never on PRs), after its closure audit and `ctest`, copies `build/llvm-ld-direct`
+never stops the charts from updating. Raise a floor only with evidence from several runs. `ci.yml`'s `build-linux` job (`ci-linux`'s post phase), on
+push to `main` only (never on PRs), after its closure audit, `ctest` and the build-tree save, copies `build/llvm-ld-direct`
 aside as the candidate, checks the link-speed payload files out at `BASELINE_REF`, rebuilds
 incrementally, copies the baseline, and restores the files (no third rebuild). It then uploads
 `candidate`, `baseline` and `bench-bins.json` (`source_sha`, `baseline_ref`, `files`, `compiler`,
@@ -237,7 +237,18 @@ sccache at all: every C++ build runs through `ci-job`, whose cache group names t
 (`zccache-<os>-<arch>-<group>-<sha>`, restored by prefix; jobs compiling identical commands share a
 group, e.g. `linux-clang-release`). `ci.yml`'s `build-linux` caches its build tree with zccache
 `snapshot`/`replay` via `tools/ci_build.py` (#21); its compile cache and the other workflows are
-being moved onto `ci-job` (#57 ci/correctness/benchmark, #58 release, #59 closure-discovery).
+on it too: `ci-linux`, `ci-linux-cross`, `ci-windows`, `correctness-coff`, `bench-allocator` (#57),
+with warm-run time floors per job (`warm_max_minutes`, checked last by the template's `floor` step,
+reported but not enforced when cold). The three MSVC jobs share `windows-msvc-release`; `ci-windows`
+builds the system-baseline targets too so that one cache covers all three. cl.exe and clang-cl
+support in zccache is partial, and zccache has failed compiles with no diagnostic: any compiling
+job that fails is rerun once with `ZCCACHE_DISABLE=1` (ninja resumes; only the remaining compiles
+run uncached), with a `::warning::`, and counts as cold (never sccache). zccache's client also
+fails a compile that has not answered in 180 s with exit 113; `ZCCACHE_WEDGE_RECV_TIMEOUT_SECS`
+is raised to 3600 for every job, because instrumented SelectionDAGBuilder.cpp takes longer. release (#58) and closure-discovery (#59) are next.
+
+`tools/audit_build.py` resolves and hashes each path once (it used to redo it for all ~1M
+`ninja -t deps` lines: 151 s -> 4 s locally, identical closure output).
 
 ### What the numbers mean, and the trap they avoid
 
@@ -391,16 +402,17 @@ python -m unittest discover -s tests -p 'test_ci_build.py' -v       # e2e test r
 `ZCCACHE="uvx --from zccache==1.14.0 zccache"` works for replay/snapshot (not as the compiler
 launcher, which needs a real `zccache` on PATH).
 
-Two invariants: (a) CI keeps sccache (GitHub Actions backend) as the compile cache; switching to
-zccache is the one `--launcher` flag in ci.yml; (b) CI snapshots and saves the build tree on push
-to main only, AFTER ctest and BEFORE the baseline-linker step, because that step leaves build/
-holding objects compiled from BASELINE_REF payload files; saving after it would pair HEAD sources
-with baseline objects. The prune step keeps a single build-tree cache so it cannot evict sccache
-from the 10 GB budget.
+Two invariants: (a) CI's compile cache is zccache (the `ci-job` template, cache group
+`linux-clang-release`), never sccache; (b) CI snapshots and saves the build tree on push to main
+only, AFTER ctest and BEFORE the baseline-linker step, because that step leaves build/ holding
+objects compiled from BASELINE_REF payload files; saving after it would pair HEAD sources with
+baseline objects. In `tools/ci_jobs.py` that ordering is structural: `ci-linux`'s body snapshots,
+the template saves the tree, and only then does the job's `post` phase build the baseline. The
+prune step keeps a single build-tree cache and one zccache entry per group.
 
 ## Build
 
-CMake + Ninja on MSVC (VS generator unsupported). `-DCMAKE_{C,CXX}_COMPILER_LAUNCHER=sccache`
+CMake + Ninja on MSVC (VS generator unsupported). `-DCMAKE_{C,CXX}_COMPILER_LAUNCHER=zccache`
 for warm rebuilds. Linux-to-Windows cross via `cmake/WinMsvcCross.cmake` + xwin; see `README.md`.
 On Linux the CI configuration is reproducible locally with `python tools/ci_build.py build` (see
 the section above).
