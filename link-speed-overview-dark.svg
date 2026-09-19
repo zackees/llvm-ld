@@ -1,0 +1,137 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 604" width="1000" height="604" role="img">
+<title>How long a link takes, and where llvm-ld saves the time: stock lld-link vs llvm-ld, link plus PDB, by build type and corpus size</title>
+<defs>
+<pattern id="hatch-baseline" width="7" height="7" patternUnits="userSpaceOnUse"><rect width="7" height="7" fill="#1f6feb" fill-opacity="0.14"/><path d="M0 7L7 0M-2 2L2 -2M5 9L9 5M0 0L7 7M-2 5L2 9M5 -2L9 2" stroke="#1f6feb" stroke-width="1.1"/></pattern>
+<pattern id="hatch-candidate" width="7" height="7" patternUnits="userSpaceOnUse"><rect width="7" height="7" fill="#a5d6ff" fill-opacity="0.14"/><path d="M0 7L7 0M-2 2L2 -2M5 9L9 5M0 0L7 7M-2 5L2 9M5 -2L9 2" stroke="#a5d6ff" stroke-width="1.1"/></pattern>
+<pattern id="hatch-legend" width="7" height="7" patternUnits="userSpaceOnUse"><rect width="7" height="7" fill="#8b98ad" fill-opacity="0.14"/><path d="M0 7L7 0M-2 2L2 -2M5 9L9 5M0 0L7 7M-2 5L2 9M5 -2L9 2" stroke="#8b98ad" stroke-width="1.1"/></pattern>
+</defs>
+<rect width="1000" height="604" fill="#0d1117"/>
+<text x="24.0" y="36.0" fill="#e8eef7" font-size="20" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="600" text-anchor="start">How long a link takes, and where llvm-ld saves the time</text>
+<text x="24.0" y="58.0" fill="#e8eef7" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="start">solid = the link itself (no /debug) · hatched = extra time to write the PDB (/debug:full) · same objects both ways</text>
+<text x="24.0" y="76.0" fill="#7d8da5" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="start">4 threads (each build type&#x27;s highest measured) · paired interleaved medians · every output byte-identical between the two linkers</text>
+<rect x="24.0" y="94.0" width="12" height="12" rx="2" fill="#1f6feb"/>
+<text x="42.0" y="104.0" fill="#e8eef7" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="start">stock lld-link (plain -O3)</text>
+<rect x="248.0" y="94.0" width="12" height="12" rx="2" fill="#a5d6ff"/>
+<text x="266.0" y="104.0" fill="#e8eef7" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="start">llvm-ld (patches + PGO + BOLT)</text>
+<rect x="500.0" y="94.0" width="22" height="12" fill="#8b98ad"/>
+<text x="528.0" y="104.0" fill="#e8eef7" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="start">link</text>
+<rect x="580.8" y="94.8" width="20.5" height="10.5" fill="url(#hatch-legend)" stroke="#8b98ad" stroke-width="1.5" stroke-dasharray="3 2"/>
+<text x="608.0" y="104.0" fill="#e8eef7" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="start">+ PDB (extra time for /debug:full)</text>
+<text x="142.0" y="138.0" fill="#e8eef7" font-size="13" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="700" text-anchor="start">small · 64 objects</text>
+<text x="428.0" y="138.0" fill="#e8eef7" font-size="13" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="700" text-anchor="start">medium · 512 objects</text>
+<text x="714.0" y="138.0" fill="#e8eef7" font-size="13" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="700" text-anchor="start">large · 2048 objects</text>
+<text x="24.0" y="184.0" fill="#e8eef7" font-size="15" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="700" text-anchor="start">Debug</text>
+<text x="24.0" y="202.0" fill="#7d8da5" font-size="11" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="start">clang -O0 -g</text>
+<rect x="142.0" y="150.0" width="270.0" height="124" fill="#111823" rx="6"/>
+<line x1="152.0" y1="162.0" x2="152.0" y2="254.0" stroke="#1f2937" stroke-width="1"/>
+<text x="152.0" y="267.0" fill="#8b98ad" font-size="10" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="middle">0</text>
+<line x1="231.0" y1="162.0" x2="231.0" y2="254.0" stroke="#1f2937" stroke-width="1"/>
+<text x="231.0" y="267.0" fill="#8b98ad" font-size="10" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="middle">15</text>
+<line x1="310.0" y1="162.0" x2="310.0" y2="254.0" stroke="#1f2937" stroke-width="1"/>
+<text x="310.0" y="267.0" fill="#8b98ad" font-size="10" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="middle">30</text>
+<rect x="152.0" y="172.0" width="51.9" height="20" fill="#1f6feb"/>
+<rect x="204.7" y="172.8" width="92.9" height="18.5" fill="url(#hatch-baseline)" stroke="#1f6feb" stroke-width="1.5" stroke-dasharray="3 2"/>
+<text x="304.3" y="186.0" fill="#e8eef7" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="start">27.8 ms</text>
+<rect x="152.0" y="200.0" width="41.5" height="20" fill="#a5d6ff"/>
+<rect x="194.2" y="200.8" width="49.5" height="18.5" fill="url(#hatch-candidate)" stroke="#a5d6ff" stroke-width="1.5" stroke-dasharray="3 2"/>
+<text x="250.5" y="214.0" fill="#e8eef7" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="700" text-anchor="start">17.6 ms</text>
+<text x="312.4" y="214.0" fill="#a5d6ff" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="700" text-anchor="start">-37%</text>
+<text x="152.0" y="234.0" fill="#7d8da5" font-size="11" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="start">PDB 17.9 ms → 9.7 ms (-46%) · link -20%</text>
+<rect x="428.0" y="150.0" width="270.0" height="124" fill="#111823" rx="6"/>
+<line x1="438.0" y1="162.0" x2="438.0" y2="254.0" stroke="#1f2937" stroke-width="1"/>
+<text x="438.0" y="267.0" fill="#8b98ad" font-size="10" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="middle">0</text>
+<line x1="517.0" y1="162.0" x2="517.0" y2="254.0" stroke="#1f2937" stroke-width="1"/>
+<text x="517.0" y="267.0" fill="#8b98ad" font-size="10" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="middle">150</text>
+<line x1="596.0" y1="162.0" x2="596.0" y2="254.0" stroke="#1f2937" stroke-width="1"/>
+<text x="596.0" y="267.0" fill="#8b98ad" font-size="10" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="middle">300</text>
+<rect x="438.0" y="172.0" width="36.7" height="20" fill="#1f6feb"/>
+<rect x="475.4" y="172.8" width="101.2" height="18.5" fill="url(#hatch-baseline)" stroke="#1f6feb" stroke-width="1.5" stroke-dasharray="3 2"/>
+<text x="583.4" y="186.0" fill="#e8eef7" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="start">265 ms</text>
+<rect x="438.0" y="200.0" width="25.4" height="20" fill="#a5d6ff"/>
+<rect x="464.1" y="200.8" width="49.5" height="18.5" fill="url(#hatch-candidate)" stroke="#a5d6ff" stroke-width="1.5" stroke-dasharray="3 2"/>
+<text x="520.4" y="214.0" fill="#e8eef7" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="700" text-anchor="start">145 ms</text>
+<text x="574.6" y="214.0" fill="#a5d6ff" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="700" text-anchor="start">-45%</text>
+<text x="438.0" y="234.0" fill="#7d8da5" font-size="11" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="start">PDB 195 ms → 96.9 ms (-50%) · link -30%</text>
+<rect x="714.0" y="150.0" width="270.0" height="124" fill="#111823" rx="6"/>
+<line x1="724.0" y1="162.0" x2="724.0" y2="254.0" stroke="#1f2937" stroke-width="1"/>
+<text x="724.0" y="267.0" fill="#8b98ad" font-size="10" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="middle">0</text>
+<line x1="803.0" y1="162.0" x2="803.0" y2="254.0" stroke="#1f2937" stroke-width="1"/>
+<text x="803.0" y="267.0" fill="#8b98ad" font-size="10" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="middle">750</text>
+<line x1="882.0" y1="162.0" x2="882.0" y2="254.0" stroke="#1f2937" stroke-width="1"/>
+<text x="882.0" y="267.0" fill="#8b98ad" font-size="10" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="middle">1,500</text>
+<rect x="724.0" y="172.0" width="38.0" height="20" fill="#1f6feb"/>
+<rect x="762.7" y="172.8" width="104.0" height="18.5" fill="url(#hatch-baseline)" stroke="#1f6feb" stroke-width="1.5" stroke-dasharray="3 2"/>
+<text x="873.5" y="186.0" fill="#e8eef7" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="start">1,362 ms</text>
+<rect x="724.0" y="200.0" width="26.0" height="20" fill="#a5d6ff"/>
+<rect x="750.7" y="200.8" width="48.0" height="18.5" fill="url(#hatch-candidate)" stroke="#a5d6ff" stroke-width="1.5" stroke-dasharray="3 2"/>
+<text x="805.5" y="214.0" fill="#e8eef7" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="700" text-anchor="start">717 ms</text>
+<text x="859.7" y="214.0" fill="#a5d6ff" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="700" text-anchor="start">-47%</text>
+<text x="724.0" y="234.0" fill="#7d8da5" font-size="11" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="start">PDB 1,002 ms → 470 ms (-53%) · link -31%</text>
+<text x="24.0" y="322.0" fill="#e8eef7" font-size="15" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="700" text-anchor="start">Release</text>
+<text x="24.0" y="340.0" fill="#7d8da5" font-size="11" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="start">clang -O2 -g</text>
+<rect x="142.0" y="288.0" width="270.0" height="124" fill="#111823" rx="6"/>
+<line x1="152.0" y1="300.0" x2="152.0" y2="392.0" stroke="#1f2937" stroke-width="1"/>
+<text x="152.0" y="405.0" fill="#8b98ad" font-size="10" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="middle">0</text>
+<line x1="231.0" y1="300.0" x2="231.0" y2="392.0" stroke="#1f2937" stroke-width="1"/>
+<text x="231.0" y="405.0" fill="#8b98ad" font-size="10" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="middle">15</text>
+<line x1="310.0" y1="300.0" x2="310.0" y2="392.0" stroke="#1f2937" stroke-width="1"/>
+<text x="310.0" y="405.0" fill="#8b98ad" font-size="10" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="middle">30</text>
+<rect x="152.0" y="310.0" width="45.2" height="20" fill="#1f6feb"/>
+<rect x="197.9" y="310.8" width="85.3" height="18.5" fill="url(#hatch-baseline)" stroke="#1f6feb" stroke-width="1.5" stroke-dasharray="3 2"/>
+<text x="290.0" y="324.0" fill="#e8eef7" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="start">25.1 ms</text>
+<rect x="152.0" y="338.0" width="39.0" height="20" fill="#a5d6ff"/>
+<rect x="191.7" y="338.8" width="41.7" height="18.5" fill="url(#hatch-candidate)" stroke="#a5d6ff" stroke-width="1.5" stroke-dasharray="3 2"/>
+<text x="240.1" y="352.0" fill="#e8eef7" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="700" text-anchor="start">15.6 ms</text>
+<text x="302.0" y="352.0" fill="#a5d6ff" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="700" text-anchor="start">-38%</text>
+<text x="152.0" y="372.0" fill="#7d8da5" font-size="11" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="start">PDB 16.5 ms → 8.2 ms (-50%) · link -15%</text>
+<rect x="428.0" y="288.0" width="270.0" height="124" fill="#111823" rx="6"/>
+<line x1="438.0" y1="300.0" x2="438.0" y2="392.0" stroke="#1f2937" stroke-width="1"/>
+<text x="438.0" y="405.0" fill="#8b98ad" font-size="10" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="middle">0</text>
+<line x1="517.0" y1="300.0" x2="517.0" y2="392.0" stroke="#1f2937" stroke-width="1"/>
+<text x="517.0" y="405.0" fill="#8b98ad" font-size="10" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="middle">150</text>
+<line x1="596.0" y1="300.0" x2="596.0" y2="392.0" stroke="#1f2937" stroke-width="1"/>
+<text x="596.0" y="405.0" fill="#8b98ad" font-size="10" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="middle">300</text>
+<rect x="438.0" y="310.0" width="32.0" height="20" fill="#1f6feb"/>
+<rect x="470.7" y="310.8" width="92.4" height="18.5" fill="url(#hatch-baseline)" stroke="#1f6feb" stroke-width="1.5" stroke-dasharray="3 2"/>
+<text x="569.9" y="324.0" fill="#e8eef7" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="start">239 ms</text>
+<rect x="438.0" y="338.0" width="25.4" height="20" fill="#a5d6ff"/>
+<rect x="464.2" y="338.8" width="40.5" height="18.5" fill="url(#hatch-candidate)" stroke="#a5d6ff" stroke-width="1.5" stroke-dasharray="3 2"/>
+<text x="511.4" y="352.0" fill="#e8eef7" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="700" text-anchor="start">128 ms</text>
+<text x="565.6" y="352.0" fill="#a5d6ff" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="700" text-anchor="start">-46%</text>
+<text x="438.0" y="372.0" fill="#7d8da5" font-size="11" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="start">PDB 178 ms → 79.7 ms (-55%) · link -21%</text>
+<rect x="714.0" y="288.0" width="270.0" height="124" fill="#111823" rx="6"/>
+<line x1="724.0" y1="300.0" x2="724.0" y2="392.0" stroke="#1f2937" stroke-width="1"/>
+<text x="724.0" y="405.0" fill="#8b98ad" font-size="10" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="middle">0</text>
+<line x1="803.0" y1="300.0" x2="803.0" y2="392.0" stroke="#1f2937" stroke-width="1"/>
+<text x="803.0" y="405.0" fill="#8b98ad" font-size="10" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="middle">750</text>
+<line x1="882.0" y1="300.0" x2="882.0" y2="392.0" stroke="#1f2937" stroke-width="1"/>
+<text x="882.0" y="405.0" fill="#8b98ad" font-size="10" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="middle">1,500</text>
+<rect x="724.0" y="310.0" width="30.1" height="20" fill="#1f6feb"/>
+<rect x="754.9" y="310.8" width="94.6" height="18.5" fill="url(#hatch-baseline)" stroke="#1f6feb" stroke-width="1.5" stroke-dasharray="3 2"/>
+<text x="856.2" y="324.0" fill="#e8eef7" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="start">1,198 ms</text>
+<rect x="724.0" y="338.0" width="22.8" height="20" fill="#a5d6ff"/>
+<rect x="747.6" y="338.8" width="36.6" height="18.5" fill="url(#hatch-candidate)" stroke="#a5d6ff" stroke-width="1.5" stroke-dasharray="3 2"/>
+<text x="790.9" y="352.0" fill="#e8eef7" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="700" text-anchor="start">578 ms</text>
+<text x="845.1" y="352.0" fill="#a5d6ff" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="700" text-anchor="start">-51%</text>
+<text x="724.0" y="372.0" fill="#7d8da5" font-size="11" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="start">PDB 912 ms → 361 ms (-60%) · link -24%</text>
+<text x="24.0" y="460.0" fill="#e8eef7" font-size="15" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="700" text-anchor="start">ThinLTO</text>
+<text x="24.0" y="478.0" fill="#7d8da5" font-size="11" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="start">clang -O2 -g -flto=thin</text>
+<rect x="142.0" y="426.0" width="270.0" height="124" fill="#111823" rx="6"/>
+<line x1="152.0" y1="438.0" x2="152.0" y2="530.0" stroke="#1f2937" stroke-width="1"/>
+<text x="152.0" y="543.0" fill="#8b98ad" font-size="10" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="middle">0</text>
+<line x1="231.0" y1="438.0" x2="231.0" y2="530.0" stroke="#1f2937" stroke-width="1"/>
+<text x="231.0" y="543.0" fill="#8b98ad" font-size="10" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="middle">10 s</text>
+<line x1="310.0" y1="438.0" x2="310.0" y2="530.0" stroke="#1f2937" stroke-width="1"/>
+<text x="310.0" y="543.0" fill="#8b98ad" font-size="10" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="middle">20 s</text>
+<rect x="152.0" y="448.0" width="125.3" height="20" fill="#1f6feb"/>
+<text x="283.3" y="462.0" fill="#e8eef7" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="start">15.9 s</text>
+<rect x="152.0" y="476.0" width="72.3" height="20" fill="#a5d6ff"/>
+<text x="230.3" y="490.0" fill="#e8eef7" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="700" text-anchor="start">9.2 s</text>
+<text x="276.8" y="490.0" fill="#a5d6ff" font-size="12" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="700" text-anchor="start">-43%</text>
+<text x="152.0" y="510.0" fill="#7d8da5" font-size="11" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="start">PDB cost within noise: codegen dominates</text>
+<rect x="428.0" y="426.0" width="270.0" height="124" fill="#111823" rx="6"/>
+<text x="563.0" y="492.0" fill="#7d8da5" font-size="11" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="middle">not measured: ThinLTO codegen is too slow</text>
+<rect x="714.0" y="426.0" width="270.0" height="124" fill="#111823" rx="6"/>
+<text x="849.0" y="492.0" fill="#7d8da5" font-size="11" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="middle">not measured: ThinLTO codegen is too slow</text>
+<text x="24.0" y="588.0" fill="#7d8da5" font-size="11" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="normal" text-anchor="start">run 35451964051 · source 7347a7438c9f · AMD EPYC 7763 64-Core Processor, 4 cores · Linux, glibc malloc · shorter is better</text>
+</svg>
