@@ -49,8 +49,8 @@ class PgoBuildFlagsTest(unittest.TestCase):
         plain = next(f for f in pgo.optimize_flags(pathlib.Path("/p/x.profdata"))
                      if f.startswith("-DCMAKE_EXE_LINKER_FLAGS="))
         self.assertNotIn("--emit-relocs", plain)
-        self.assertIn("-icf=safe", pgo.BOLT_OPTIMIZE_FLAGS)
-        self.assertFalse(any(f in ("-icf=1", "-icf=all") for f in pgo.BOLT_OPTIMIZE_FLAGS))
+        # No identical-code folding: it can break function-pointer comparisons.
+        self.assertFalse(any(f.startswith("-icf") for f in pgo.BOLT_OPTIMIZE_FLAGS))
 
     def test_builds_share_ci_configure_flags(self) -> None:
         base = pgo.ci_build.configure_command(pathlib.Path("/w"), pathlib.Path("/b"), "none",

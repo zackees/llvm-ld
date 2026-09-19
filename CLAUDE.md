@@ -315,7 +315,8 @@ corpus (Release medium + PDB, +14.4%) matched the held-out ones, so the profile 
 - NixOS: `-fuse-ld=lld` bypasses the cc-wrapper, so `optimize` probes a normally linked C++
   program's RUNPATH and repeats it (`runtime_rpath`); elsewhere the probe finds none.
 - `--bolt` (Linux) adds a BOLT post-link layout stage on top of PGO (`all --bolt`, or
-  `optimize --bolt` then `bolt`; needs `llvm-bolt`/`merge-fdata`, `--bolt-dir`). Safe ICF only.
+  `optimize --bolt` then `bolt`; needs `llvm-bolt`/`merge-fdata`, `--bolt-dir`). No ICF (it can
+  break function-pointer comparisons, and BOLT 18 has no safe mode); the layout is the gain.
 - The `link-benchmark` candidate is built with `all --bolt` (owner decision, 2026-09-19): the
   chart shows llvm-ld as built to be fast (patches + PGO + ThinLTO + BOLT) against stock lld from
   the same payload built plain (-O3), and both labels say so. Shipping PGO in release builds is

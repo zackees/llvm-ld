@@ -23,8 +23,8 @@ Stages (each a subcommand; `all` runs them in order):
               With --bolt it also keeps relocations (--emit-relocs) for BOLT.
   bolt        post-link layout optimization of <out-dir>/llvm-ld-direct with
               llvm-bolt (Linux): instrument, train on the same workload, merge,
-              then reorder blocks/functions and split hot/cold code, with safe
-              ICF only. Measured +6.1% wall / -5.5% CPU on top of PGO for a
+              then reorder blocks/functions and split hot/cold code (no ICF).
+              Measured +6.1% wall / -5.5% CPU on top of PGO for a
               ThinLTO link, byte-identical output (codegen round 2). The pre-BOLT
               binary is kept as llvm-ld-direct.pre-bolt.
 
@@ -221,10 +221,10 @@ def cmd_optimize(args: argparse.Namespace) -> int:
 
 BOLT_OPTIMIZE_FLAGS = [
     "-reorder-blocks=ext-tsp", "-reorder-functions=cdsort", "-split-functions",
-    "-split-all-cold", "-split-eh",
-    # "safe" folds only functions whose address is never taken; "all" can break code
-    # that compares function pointers, which the output gate would not catch.
-    "-icf=safe", "-use-gnu-stack",
+    "-split-all-cold", "-split-eh", "-use-gnu-stack",
+    # No -icf: folding identical functions can break code that compares function
+    # pointers (the output gate would not catch that), BOLT 18 has no "safe" mode
+    # (its -icf is a boolean), and the layout, not the ~280 KB folding, is the gain.
 ]
 
 
