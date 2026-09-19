@@ -473,6 +473,8 @@ def job_ci_linux_cross(args: argparse.Namespace) -> None:
     launcher = launcher_or_none()
     launch = [f"-DCMAKE_C_COMPILER_LAUNCHER={launcher if launcher != 'none' else ''}",
               f"-DCMAKE_CXX_COMPILER_LAUNCHER={launcher if launcher != 'none' else ''}"]
+    if launcher != "none":  # the standalone configure does not read the root CMakeLists.txt rule
+        launch.append("-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON")
     # Stage 1: native tablegen. The standalone llvm configure does not inherit the root cache
     # settings, so every LLVM_INCLUDE_* guard the pruned payload needs is repeated.
     sh(["cmake", "-S", "llvm-project/llvm", "-B", "build-tblgen", "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release",

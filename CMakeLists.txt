@@ -13,6 +13,13 @@ endif()
 # output: every Windows and cross compile was a cache miss by construction. Without /Zi (a Release
 # build, LLVM_ENABLE_PDB off) the compiler writes no PDB, so /Fd changes nothing in any object and
 # is dropped. With /Zi the rule is left alone.
+# LLVM turns precompiled headers off when the compiler launcher is sccache or ccache
+# (HandleLLVMOptions.cmake), which CI relied on while it used sccache. zccache is not on that list,
+# so moving CI to zccache (#55) silently turned PCH on, and every cl/clang-cl PCH compile (/Yu /Fp)
+# is non-cacheable in zccache (PR #60: 0 hits, 1493 non-cacheable). Same rule for zccache.
+if(CMAKE_CXX_COMPILER_LAUNCHER MATCHES "zccache" AND NOT DEFINED CMAKE_DISABLE_PRECOMPILE_HEADERS)
+  set(CMAKE_DISABLE_PRECOMPILE_HEADERS ON)
+endif()
 if(MSVC AND CMAKE_BUILD_TYPE MATCHES "^(Release|MinSizeRel)$" AND NOT LLVM_ENABLE_PDB)
   string(TOUPPER "${CMAKE_BUILD_TYPE}" _llvm_ld_config)
   foreach(lang C CXX)
