@@ -44,6 +44,12 @@ import ci_build  # noqa: E402
 
 # The zccache release the template installs (`zackees/zccache@<tag>` with `zccache-version`).
 ZCCACHE_VERSION = "1.14.3"
+# zccache's client treats a compile that has not answered within 180 s (queue wait included) as a
+# wedged daemon and fails it with exit code 113. The largest PGO-instrumented LLVM TUs
+# (SelectionDAGBuilder.cpp, PassBuilder.cpp) take longer on a 4-core runner, which failed
+# link-benchmark's pgo-instr twice (runs 35460448617, 35461848322). One hour still catches a real
+# wedge well before any job timeout. Set for every command a job runs (main()).
+ZCCACHE_ENV = {"ZCCACHE_WEDGE_RECV_TIMEOUT_SECS": "3600"}
 BOLT_DIR = "/usr/lib/llvm-18/bin"
 
 
@@ -457,6 +463,8 @@ def main(argv: list[str] | None = None) -> int:
     prune.set_defaults(func=cmd_prune)
     sub.add_parser("list").set_defaults(func=cmd_list)
     args = parser.parse_args(argv)
+    for key, value in ZCCACHE_ENV.items():
+        os.environ.setdefault(key, value)
     return args.func(args)
 
 
