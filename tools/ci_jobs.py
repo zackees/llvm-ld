@@ -37,6 +37,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
 from pathlib import Path
 from typing import Callable
@@ -121,7 +122,7 @@ class Job:
     artifact_needed_downstream: bool = False
     # False when the artifact is a toolchain the job provisions (xwin, clang-cl), not its output.
     artifact_skips_job: bool = True
-    setup: Callable[[], None] | None = None
+    setup: Callable[[argparse.Namespace], None] | None = None
     # Build-tree cache: (key, restore prefix, path), restored by prefix, saved by main after `run`.
     tree: Callable[[], tuple[str, str, str]] | None = None
     # Work that must follow the cache saves (e.g. anything that dirties the build tree).
@@ -135,7 +136,7 @@ def apt_install(*packages: str) -> None:
     sh(["sudo", "apt-get", "install", "-y", "-qq", *packages], stdout=subprocess.DEVNULL)
 
 
-def setup_pgo_toolchain() -> None:
+def setup_pgo_toolchain(args: argparse.Namespace) -> None:
     apt_install("lld", "llvm", "libclang-rt-dev", "bolt-18")
     if not Path(BOLT_DIR, "llvm-bolt").exists():
         raise SystemExit(f"::error::llvm-bolt missing from {BOLT_DIR}")
@@ -413,7 +414,7 @@ def job_ci_linux_bench_bins(args: argparse.Namespace) -> None:
     }, sort_keys=True))
 
 
-def setup_cross_clang() -> None:
+def setup_cross_clang(args: argparse.Namespace) -> None:
     """The pinned apt.llvm.org clang-cl/lld-link/llvm-lib/llvm-rc/llvm-nm (versions in ci.yml's
     job env; see PROVENANCE.md). The signing key's SHA-256 is checked before it is trusted."""
     env = os.environ
@@ -590,6 +591,137 @@ def job_bench_allocator(args: argparse.Namespace) -> None:
                ["llvm-ld-runner", "llvm-ld-runner-system", "allocator-probe", "allocator-probe-system"])
 
 
+
+# --- release.yml (#58) ---------------------------------------------------
+
+RELEASE_CORPORA = [("debug", "small"), ("debug", "medium"), ("release", "small"), ("release", "medium"),
+                   ("thinlto", "small")]
+
+
+def release_corpus_key(args: argparse.Namespace) -> str:
+    gen = bench_ci.hash_paths(ROOT, ["tests/perf/gen_corpus.py", "tools/release_build.py"])[:16]
+    clang = "".join(ch for ch in out("clang --version").splitlines()[0] if ch.isalnum() or ch == ".")
+    return f"release-corpus-{gen}-{clang}"
+
+
+def job_release_corpus(args: argparse.Namespace) -> None:
+    """The PGO training and gate corpora (host-independent COFF), one tarball for every leg."""
+    for mode, profile in RELEASE_CORPORA:
+        sh([PY, "tests/perf/gen_corpus.py", "--out", "pgo-corpus", "--mode", mode, "--profile", profile,
+            "--jobs", str(os.cpu_count())])
+    for source in (ROOT / "pgo-corpus").rglob("*.cpp"):
+        source.unlink()
+    (ROOT / "release-corpus").mkdir(exist_ok=True)
+    sh(["tar", "czf", "release-corpus/pgo-corpus.tar.gz", "pgo-corpus"])
+
+
+def release_kind(triple: str) -> str:
+    if "windows" in triple:
+        return "windows"
+    if "musl" in triple:
+        return "musl"
+    return "macos" if "apple" in triple else "linux"
+
+
+def setup_release(args: argparse.Namespace) -> None:
+    kind = release_kind(args.triple)
+    if kind == "linux":
+        apt_install("ninja-build", "clang", "lld", "llvm", "libclang-rt-dev")
+    elif kind == "macos":
+        sh(["brew", "install", "ninja"])
+    elif kind == "windows" and not shutil.which("clang-cl"):
+        sh(["choco", "install", "llvm", "-y", "--no-progress"])
+    if kind == "windows":
+        llvm_bin = r"C:\Program Files\LLVM\bin"
+        os.environ["PATH"] = llvm_bin + os.pathsep + os.environ["PATH"]
+        if os.environ.get("GITHUB_PATH"):
+            with open(os.environ["GITHUB_PATH"], "a", encoding="utf-8") as handle:
+                handle.write(llvm_bin + "\n")
+
+
+def release_version() -> str:
+    if os.environ.get("GITHUB_REF", "").startswith("refs/tags/"):
+        return os.environ["GITHUB_REF_NAME"]
+    return f"v0.0.0-{os.environ.get('GITHUB_SHA', 'local')[:12]}"
+
+
+def fetch_reference(triple: str) -> Path:
+    """The previous release's archive for this host, for release_build.py's byte-identity gate."""
+    previous = out(["gh", "release", "list", "--limit", "1", "--exclude-drafts", "--exclude-pre-releases",
+                    "--json", "tagName", "--jq", ".[0].tagName"])
+    if not previous:
+        raise SystemExit("::error::no previous release to gate against")
+    reference = ROOT / "reference"
+    reference.mkdir(exist_ok=True)
+    sh(["gh", "release", "download", previous, "-D", str(reference), "-p", f"llvm-ld-coff-{previous}-{triple}.*",
+        "--clobber"])
+    archive = next(reference.glob("llvm-ld-coff-*"))
+    summary(f"### PGO gate against {previous}")
+    return archive
+
+
+def job_release_build(args: argparse.Namespace) -> None:
+    """One release host: PGO + ThinLTO build, byte-identity gate against the previous release, and
+    packaging (tools/release_build.py), with zccache as the compiler launcher."""
+    triple, kind = args.triple, release_kind(args.triple)
+    with tarfile.open(ROOT / "pgo-corpus.tar.gz") as corpus:  # portable: Windows legs too
+        corpus.extractall(ROOT, **({"filter": "data"} if hasattr(tarfile, "data_filter") else {}))
+    archive = fetch_reference(triple).relative_to(ROOT)
+    common = ["tools/release_build.py", "--triple", triple, "--version", release_version(), "--pgo",
+              "--train-corpus", "pgo-corpus", "--reference", str(archive)]
+    if kind == "musl":
+        args.unobserved = True
+        release_build_in_alpine(common)
+        return
+
+    sh([PY, *common, "--launcher", launcher_or_none()])
+
+
+def release_build_in_alpine(common: list[str]) -> None:
+    """musl hosts build inside Alpine on the same-architecture runner, so the library links musl
+    and its tests run natively. zccache's Linux release binary is static musl, so the host's copy
+    runs in the container; the host daemon is stopped first so the container's daemon owns the
+    restored cache directory, which the template saves afterwards. Its compiles are not visible
+    to this job's zccache session, so the job is never reported warm."""
+    zccache = shutil.which("zccache")
+    mounts, env, launcher, cache_root = [], [], "none", ""
+    if zccache:
+        cache_root = out([zccache, "cache-root"]) or str(Path.home() / ".zccache")
+        Path(cache_root).mkdir(parents=True, exist_ok=True)
+        subprocess.run([zccache, "stop"], capture_output=True)
+        mounts = ["-v", f"{Path(zccache).parent}:/opt/zccache:ro", "-v", f"{cache_root}:/zccache-cache"]
+        # The container's daemon logs to the checkout, so a failure shows zccache's side of it.
+        env = ["-e", "ZCCACHE_CACHE_DIR=/zccache-cache", "-e", "ZCCACHE_LOG_FILE=/src/zccache-daemon.log",
+               *(f"-e{key}={value}" for key, value in ZCCACHE_ENV.items()),
+               # Set by call_with_bypass_retry on the retry.
+               *(["-e", "ZCCACHE_DISABLE=1"] if os.environ.get("ZCCACHE_DISABLE") == "1" else []),
+               "-e", "PATH=/opt/zccache:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"]
+        launcher = "zccache"
+    script = ("apk add --no-cache build-base cmake ninja python3 linux-headers git clang lld llvm compiler-rt && "
+              "clang --version && python3 " + " ".join(shlex.quote(a) for a in common) + f" --launcher {launcher}")
+    daemon_log = ROOT / "zccache-daemon.log"
+    try:
+        sh(["docker", "run", "--rm", "-v", f"{ROOT}:/src", "-w", "/src", *mounts, *env,
+            "-e", "GITHUB_STEP_SUMMARY=/src/step-summary.md", "alpine:3.20", "sh", "-euc", script])
+    except subprocess.CalledProcessError:
+        if daemon_log.exists():
+            log("::group::zccache daemon log (last 200 lines)")
+            log("\n".join(daemon_log.read_text(errors="replace").splitlines()[-200:]))
+            log("::endgroup::")
+        raise
+    finally:
+        uid_gid = f"{os.getuid()}:{os.getgid()}"
+        sh(["sudo", "chown", "-R", uid_gid, str(ROOT)])
+        if zccache:
+            sh(["sudo", "chown", "-R", uid_gid, cache_root])
+        note = ROOT / "step-summary.md"
+        if note.exists():
+            summary(note.read_text())
+            note.unlink()
+        for rotated in ROOT.glob("zccache-daemon.log*"):
+            rotated.unlink()
+
+
 JOBS: dict[str, Job] = {job.name: job for job in [
     Job("bench-corpus", job_bench_corpus, artifact_key=corpus_key, artifact_dir="./build-perf/corpus",
         artifact_needed_downstream=True),
@@ -609,6 +741,10 @@ JOBS: dict[str, Job] = {job.name: job for job in [
     Job("correctness-coff", job_correctness_coff, cache_group="windows-msvc-release",
         artifact_key=clangcl_key, artifact_dir="pinned-clangcl", artifact_skips_job=False, warm_max_minutes=5),
     Job("bench-allocator", job_bench_allocator, cache_group="windows-msvc-release", warm_max_minutes=5),
+    Job("release-corpus", job_release_corpus, artifact_key=release_corpus_key, artifact_dir="./release-corpus"),
+    # Release legs compile PGO-instrumented and -fprofile-use objects, so each triple has its own
+    # group; no floor, since a release is rarely warm (the scheduled main run refreshes the caches).
+    Job("release-build", job_release_build, cache_group="release-{triple}", setup=setup_release),
 ]}
 
 
@@ -670,6 +806,11 @@ def timing_path(job: str, label: str | None) -> Path:
     return temp() / "timing" / f"timing-{safe}.json"
 
 
+def cache_group(job: Job, args: argparse.Namespace) -> str:
+    """The job's zccache group; "{triple}" etc. are filled from the job's arguments."""
+    return (job.cache_group or "").format(**vars(args))
+
+
 def artifact_path(job: Job) -> Path:
     if job.artifact_dir.startswith("./"):
         return ROOT / job.artifact_dir[2:]
@@ -680,11 +821,11 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     job = JOBS[args.job]
     start = time.time()
     if job.setup:
-        job.setup()
+        job.setup(args)
     tree_key, tree_restore, tree_path = job.tree() if job.tree else ("", "", "")
     gh_output(
         start=f"{start:.0f}",
-        **{"cache-group": job.cache_group or "",
+        **{"cache-group": cache_group(job, args),
            "artifact-key": job.artifact_key(args) if job.artifact_key else "",
            "artifact-path": str(artifact_path(job)) if job.artifact_key else "",
            "artifact-save": "true" if job.artifact_key and not job.artifact_read_only
@@ -732,7 +873,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         log(f"{job.name}: exact-input artifact cache hit; nothing to do")
     else:
         status, stats = run_body(job, job.body, args)
-    warm = status == 0 and not getattr(args, "bypassed", False) and (
+    # A job whose compiles ran where this session cannot see them (a container), or that fell back
+    # to bypassing zccache, is never warm.
+    warm = status == 0 and not getattr(args, "unobserved", False) and not getattr(args, "bypassed", False) and (
         args.cached == "true" or not args.compiled or is_warm(stats))
     record = {"job": args.label or job.name, "seconds": round(time.time() - start, 1), "warm": warm,
               "detail": args.detail or ("built" if args.compiled else "")}
@@ -809,7 +952,7 @@ def cmd_prune(args: argparse.Namespace) -> int:
         log("this run saves no caches; nothing to prune")
         return 0
     if job.cache_group:
-        prefix = f"zccache-{os.environ.get('RUNNER_OS', '')}-{os.environ.get('RUNNER_ARCH', '')}-{job.cache_group}-"
+        prefix = f"zccache-{os.environ.get('RUNNER_OS', '')}-{os.environ.get('RUNNER_ARCH', '')}-{cache_group(job, args)}-"
         prune_prefix(prefix, prefix + os.environ["GITHUB_SHA"])
     if job.tree and args.tree_key:
         prune_prefix(ci_build.KEY_PREFIX + "-", args.tree_key)
@@ -835,10 +978,12 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--smoke", action="store_true", help="bench-*: the small smoke matrix")
         p.add_argument("--runs", type=int, default=9)
         p.add_argument("--lto-runs", type=int, default=5)
+        p.add_argument("--triple", help="release-build: the host triple")
         p.set_defaults(func=func)
     prune = sub.add_parser("prune")
     prune.add_argument("job", choices=sorted(JOBS))
     prune.add_argument("--tree-key", default="")
+    prune.add_argument("--triple", help="release-build: the host triple")
     prune.set_defaults(func=cmd_prune)
     sub.add_parser("list").set_defaults(func=cmd_list)
     args = parser.parse_args(argv)
