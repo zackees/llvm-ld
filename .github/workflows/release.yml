@@ -10,6 +10,12 @@ name: release
 # release path builds the same matrix without publishing, so a tag never meets a broken leg for
 # the first time. Consumers (reld) pin a release by version and SHA-256 and load the library at
 # runtime, so they never compile LLVM themselves.
+#
+# Every host is built with clang PGO + ThinLTO (#46): an instrumented build, training links over
+# the corpora the `corpus` job generates, and an optimized build (tools/release_build.py --pgo).
+# Each leg then gates on the previous release: its runner and the new runner link the same
+# corpora and must produce byte-identical EXE and PDB, so neither PGO nor the compiler switch
+# (gcc -> clang, MSVC -> clang-cl) can change what the linker outputs.
 
 on:
   push:
@@ -18,6 +24,7 @@ on:
     paths:
       - .github/workflows/release.yml
       - tools/release_build.py
+      - tests/perf/gen_corpus.py
   workflow_dispatch:
 
 concurrency:
@@ -28,10 +35,34 @@ permissions:
   contents: read
 
 jobs:
+  # Training and gate corpora for every leg: freestanding C++ compiled by clang to Windows COFF,
+  # so they are host-independent inputs. Generated once, downloaded by each leg.
+  corpus:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate the PGO training and gate corpora
+        run: |
+          set -euo pipefail
+          for mp in "debug small" "debug medium" "release small" "release medium" "thinlto small"; do
+            set -- $mp
+            python3 tests/perf/gen_corpus.py --out pgo-corpus --mode "$1" --profile "$2" --jobs "$(nproc)"
+          done
+          find pgo-corpus -name '*.cpp' -delete
+          tar czf pgo-corpus.tar.gz pgo-corpus
+          du -sh pgo-corpus pgo-corpus.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pgo-corpus
+          path: pgo-corpus.tar.gz
+          retention-days: 7
+
   build:
     name: Build ${{ matrix.triple }}
+    needs: corpus
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 180
+    # Two full builds (instrumented, then PGO + ThinLTO) plus training and the gate.
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -54,10 +85,41 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then v="$GITHUB_REF_NAME"; else v="v0.0.0-${GITHUB_SHA::12}"; fi
           echo "value=$v" >> "$GITHUB_OUTPUT"
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: pgo-corpus
+
+      - name: Unpack corpora and fetch the previous release for the gate
+        id: reference
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tar xzf pgo-corpus.tar.gz
+          prev=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --exclude-drafts --exclude-pre-releases --json tagName --jq '.[0].tagName')
+          test -n "$prev" || { echo "::error::no previous release to gate against"; exit 1; }
+          mkdir -p reference
+          gh release download "$prev" --repo "$GITHUB_REPOSITORY" -D reference -p "llvm-ld-coff-$prev-${{ matrix.triple }}.*"
+          archive=$(ls reference/llvm-ld-coff-*)
+          echo "previous release $prev: $archive"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          echo "### PGO gate against $prev" >> "$GITHUB_STEP_SUMMARY"
+
       - if: matrix.kind == 'windows'
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: ${{ matrix.msvc_arch }}
+
+      - name: clang toolchain (Windows)
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command clang-cl -ErrorAction SilentlyContinue)) {
+            choco install llvm -y --no-progress
+            echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
+          }
 
       - name: Build and package (Windows)
         if: matrix.kind == 'windows'
@@ -65,15 +127,18 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
-          python tools/release_build.py --triple ${{ matrix.triple }} --version ${{ steps.version.outputs.value }}
+          $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
+          clang-cl --version
+          python tools/release_build.py --triple ${{ matrix.triple }} --version ${{ steps.version.outputs.value }} --pgo --train-corpus pgo-corpus --reference ${{ steps.reference.outputs.archive }}
 
       - name: Build and package (Linux glibc)
         if: matrix.kind == 'linux'
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y ninja-build
-          python3 tools/release_build.py --triple ${{ matrix.triple }} --version ${{ steps.version.outputs.value }}
+          sudo apt-get install -y ninja-build clang lld llvm libclang-rt-dev
+          clang --version
+          python3 tools/release_build.py --triple ${{ matrix.triple }} --version ${{ steps.version.outputs.value }} --pgo --train-corpus pgo-corpus --reference ${{ steps.reference.outputs.archive }}
 
       # musl builds inside Alpine on the same-architecture runner, so the library links musl and
       # its tests run natively.
@@ -81,18 +146,21 @@ jobs:
         if: matrix.kind == 'musl'
         run: |
           set -euo pipefail
-          docker run --rm -v "$PWD:/src" -w /src alpine:3.20 sh -euc '
-            apk add --no-cache build-base cmake ninja python3 linux-headers git
-            python3 tools/release_build.py --triple ${{ matrix.triple }} --version ${{ steps.version.outputs.value }}
+          docker run --rm -v "$PWD:/src" -w /src -e GITHUB_STEP_SUMMARY=/src/step-summary.md alpine:3.20 sh -euc '
+            apk add --no-cache build-base cmake ninja python3 linux-headers git clang lld llvm compiler-rt
+            clang --version
+            python3 tools/release_build.py --triple ${{ matrix.triple }} --version ${{ steps.version.outputs.value }} --pgo --train-corpus pgo-corpus --reference ${{ steps.reference.outputs.archive }}
           '
-          sudo chown -R "$(id -u):$(id -g)" dist build-release
+          cat step-summary.md >> "$GITHUB_STEP_SUMMARY" || true
+          sudo chown -R "$(id -u):$(id -g)" dist build-release build-release-instr
 
       - name: Build and package (macOS)
         if: matrix.kind == 'macos'
         run: |
           set -euo pipefail
           brew install ninja
-          python3 tools/release_build.py --triple ${{ matrix.triple }} --version ${{ steps.version.outputs.value }}
+          clang --version
+          python3 tools/release_build.py --triple ${{ matrix.triple }} --version ${{ steps.version.outputs.value }} --pgo --train-corpus pgo-corpus --reference ${{ steps.reference.outputs.archive }}
 
       - uses: actions/upload-artifact@v4
         with:
@@ -128,6 +196,8 @@ jobs:
           **llvm-ld-coff links Windows PE/COFF executables and DLLs** (LLD's lld-link/MSVC and MinGW drivers) through the C ABI in `llvm_ld.h` (ABI v1).
 
           The triple in each archive name is the **host** the library runs on, not what it links: every archive links Windows targets, so the Linux and macOS builds are Windows cross-linkers.
+
+          Every host is built with **clang PGO + ThinLTO**. Each build was gated in CI against the previous release on the same host: both linked the same corpora and produced byte-identical EXE and PDB, so the output is unchanged; only link speed differs.
 
           Each archive holds the shared library (`llvm_ld.dll` + `llvm_ld.lib`, `libllvm_ld.so`, or `libllvm_ld.dylib`), `llvm_ld.h`, `llvm-ld-runner`, and the license and provenance notices. Verify downloads with `SHA256SUMS`.
           NOTES
