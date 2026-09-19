@@ -221,12 +221,13 @@ derivation from `provenance/payload-prune.json` exists in `ci.yml` and twice in
 `link-benchmark.yml` (download verification and the fallback build) and must stay identical. Drift
 is not silent: `link-benchmark` falls back to a cold build, and the step summary states which path
 ran. clang was picked over a runner-image default because it matches the compiler the benchmark
-already records and the clang-generated corpora, and because compile caches key on the compiler,
-so one warm sccache serves both workflows.
+already records and the clang-generated corpora.
 
-zccache (PR #18) was closed as superseded for the benchmark: `ci.yml`'s `build-linux` now caches
-its build tree with zccache 1.14.0 `snapshot`/`replay` via `tools/ci_build.py` (#21), while compile
-caching stays on sccache.
+Compile caching: **zccache, not sccache** (owner decision, 2026-09-19). `link-benchmark` uses no
+sccache at all: every C++ build node runs under the shared `zccache-build` action with its own
+zccache cache. `ci.yml`'s `build-linux` caches its build tree with zccache 1.14.0
+`snapshot`/`replay` via `tools/ci_build.py` (#21); its compile cache and the other workflows'
+still use sccache, which is being migrated (#54).
 
 ### What the numbers mean, and the trap they avoid
 

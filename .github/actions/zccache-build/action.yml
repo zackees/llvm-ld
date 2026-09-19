@@ -23,6 +23,16 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: install zccache (pinned)
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v zccache >/dev/null; then
+          pipx install zccache==1.14.0 >/dev/null
+          echo "$(pipx environment --value PIPX_BIN_DIR)" >> "$GITHUB_PATH"
+          export PATH="$(pipx environment --value PIPX_BIN_DIR):$PATH"
+        fi
+        zccache --version
     - name: restore this job's zccache
       id: restore
       uses: actions/cache/restore@v4

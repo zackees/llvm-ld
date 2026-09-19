@@ -326,77 +326,51 @@ jobs:
               >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - uses: mozilla-actions/sccache-action@v0.0.11
+      # Fallback when ci.yml's artifact is unavailable (e.g. a dispatch on a branch): build the
+      # plain candidate tree under this job's own zccache, then rebuild only the link-speed payload
+      # files at BASELINE_REF for the stock baseline.
+      - id: fallback
         if: steps.prebuilt.outputs.found != 'true'
-      # LLVM_APPEND_VC_REV=OFF: with it ON, LLVM stamps the git revision into
-      # VCSRevision.h, so every commit changes LLVMSupport, which both defeats
-      # byte-identity comparisons and poisons the compiler cache.
-      # The compiler and flags here must match ci.yml's build-linux job,
-      # because the common path (prebuilt found above) benchmarks that job's
-      # binaries.
-      - name: build the candidate linker
-        if: steps.prebuilt.outputs.found != 'true'
-        env:
-          # Every other workflow sets this; without it sccache uses an empty
-          # local disk cache, and with the compiler now aligned to ci.yml
-          # (clang) the fallback can hit ci.yml build-linux's warm cache.
-          SCCACHE_GHA_ENABLED: "true"
-        run: |
-          set -euo pipefail
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_APPEND_VC_REV=OFF \
-            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-          cmake --build build --target llvm-ld-direct
-          mkdir -p "$RUNNER_TEMP/bin"
-          cp build/llvm-ld-direct "$RUNNER_TEMP/bin/candidate"
-
-      # Rebuild the link-speed payload files at their pre-optimisation revision.
-      # A file listed in the current provenance/payload-prune.json but absent at
-      # BASELINE_REF is skipped with a warning (failing only if none remain), so
-      # a future link-speed patch that adds a new payload file cannot break the
-      # benchmark. The build tree is otherwise untouched, so this is a handful
-      # of translation units and a relink.
-      - name: build the baseline linker
-        if: steps.prebuilt.outputs.found != 'true'
-        env:
-          # Every other workflow sets this; without it sccache uses an empty
-          # local disk cache, and with the compiler now aligned to ci.yml
-          # (clang) the fallback can hit ci.yml build-linux's warm cache.
-          SCCACHE_GHA_ENABLED: "true"
-        run: |
-          set -euo pipefail
-          CANDIDATE_FILES=$(python3 -c "
-          import json
-          d = json.load(open('provenance/payload-prune.json'))
-          print(' '.join('llvm-project/' + e['path'] for e in d['patched'] if 'link-speed' in e['reason']))
-          ")
-          if [ -z "$CANDIDATE_FILES" ]; then
-            echo "::error::provenance/payload-prune.json lists no link-speed payload files; the baseline cannot be reconstructed"
-            exit 1
-          fi
-          FILES=""
-          for f in $CANDIDATE_FILES; do
-            if git cat-file -e "$BASELINE_REF:$f" 2>/dev/null; then
-              FILES="$FILES $f"
-            else
-              echo "::warning::$f does not exist at $BASELINE_REF; building the baseline with the current version of that file"
+        uses: ./.github/actions/zccache-build
+        with:
+          job: plain
+          key: ${{ hashFiles('provenance/llvm-source-closure.json', 'provenance/payload-prune.json', 'CMakeLists.txt', 'cmake/**', 'src/**', 'include/**', 'tools/direct_runner.cpp') }}
+          run: |
+            set -euo pipefail
+            cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DLLVM_APPEND_VC_REV=OFF \
+              -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+              -DCMAKE_C_COMPILER_LAUNCHER=zccache -DCMAKE_CXX_COMPILER_LAUNCHER=zccache
+            cmake --build build --target llvm-ld-direct
+            mkdir -p "$RUNNER_TEMP/bin"
+            set -euo pipefail
+            CANDIDATE_FILES=$(python3 -c "
+            import json
+            d = json.load(open('provenance/payload-prune.json'))
+            print(' '.join('llvm-project/' + e['path'] for e in d['patched'] if 'link-speed' in e['reason']))
+            ")
+            if [ -z "$CANDIDATE_FILES" ]; then
+              echo "::error::provenance/payload-prune.json lists no link-speed payload files; the baseline cannot be reconstructed"
+              exit 1
             fi
-          done
-          FILES="${FILES# }"
-          if [ -z "$FILES" ]; then
-            echo "::error::none of the link-speed payload files listed in provenance/payload-prune.json exist at $BASELINE_REF; the baseline cannot be reconstructed"
-            exit 1
-          fi
-          echo "baseline files: $FILES"
-          git checkout "$BASELINE_REF" -- $FILES
-          cmake --build build --target llvm-ld-direct
-          cp build/llvm-ld-direct "$RUNNER_TEMP/bin/baseline"
-          git checkout HEAD -- $FILES
-          # The candidate was copied aside before the swap and nothing
-          # downstream reads the build tree, so rebuilding the candidate here
-          # was dead work (this folds in the one substantive change from
-          # PR #18).
+            FILES=""
+            for f in $CANDIDATE_FILES; do
+              if git cat-file -e "$BASELINE_REF:$f" 2>/dev/null; then
+                FILES="$FILES $f"
+              else
+                echo "::warning::$f does not exist at $BASELINE_REF; building the baseline with the current version of that file"
+              fi
+            done
+            FILES="${FILES# }"
+            if [ -z "$FILES" ]; then
+              echo "::error::none of the link-speed payload files listed in provenance/payload-prune.json exist at $BASELINE_REF; the baseline cannot be reconstructed"
+              exit 1
+            fi
+            echo "baseline files: $FILES"
+            git checkout "$BASELINE_REF" -- $FILES
+            cmake --build build --target llvm-ld-direct
+            cp build/llvm-ld-direct "$RUNNER_TEMP/bin/baseline"
+            git checkout HEAD -- $FILES
 
       - uses: actions/upload-artifact@v4
         with:
@@ -408,8 +382,9 @@ jobs:
         with:
           job: plain
           start: ${{ steps.t0.outputs.start }}
-          warm: ${{ steps.prebuilt.outputs.found == 'true' && 'true' || 'false' }}
-          detail: baseline ${{ steps.prebuilt.outputs.found == 'true' && 'prebuilt by ci.yml' || 'built in-job' }}
+          warm: ${{ (steps.prebuilt.outputs.found == 'true' || steps.fallback.outputs.warm == 'true') && 'true' || 'false' }}
+          detail: baseline ${{ steps.prebuilt.outputs.found == 'true' && 'prebuilt by ci.yml' || 'built in-job under zccache' }}
+          zccache-stats: ${{ steps.fallback.outputs.stats }}
 
   # PGO, stage 1: instrumented build + training -> profile. Skipped entirely when the optimized
   # binary for this exact-input key is already cached.
