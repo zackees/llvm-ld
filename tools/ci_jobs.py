@@ -381,6 +381,14 @@ def artifact_path(job: Job) -> Path:
     return temp() / job.artifact_dir
 
 
+def artifact_cache_path(job: Job) -> str:
+    """The path given to actions/cache. actions/cache folds the path *as spelled* into the entry's
+    version, so a workspace artifact must be spelled exactly as the jobs that restore it spell it
+    (relative, e.g. build-perf/corpus); an absolute spelling made every restore of the corpus miss
+    (run 35463179074)."""
+    return job.artifact_dir[2:] if job.artifact_dir.startswith("./") else str(artifact_path(job))
+
+
 def cmd_prepare(args: argparse.Namespace) -> int:
     job = JOBS[args.job]
     start = time.time()
@@ -390,7 +398,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         start=f"{start:.0f}",
         **{"cache-group": job.cache_group or "",
            "artifact-key": job.artifact_key(args) if job.artifact_key else "",
-           "artifact-path": str(artifact_path(job)) if job.artifact_key else "",
+           "artifact-path": artifact_cache_path(job) if job.artifact_key else "",
            "artifact-save": "true" if job.artifact_key and not job.artifact_read_only
            and (saves_caches() or job.artifact_needed_downstream) else "false",
            "save": "true" if saves_caches() else "false",

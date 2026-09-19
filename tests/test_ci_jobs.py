@@ -40,6 +40,11 @@ class JobTableTest(unittest.TestCase):
         self.assertIn(f"zackees/zccache@{ci_jobs.ZCCACHE_VERSION}", text)
         self.assertIn(f"zackees/zccache/action/cleanup@{ci_jobs.ZCCACHE_VERSION}", text)
 
+    def test_workspace_artifacts_are_cached_under_the_path_their_restorers_use(self):
+        self.assertEqual(ci_jobs.artifact_cache_path(ci_jobs.JOBS["bench-corpus"]), "build-perf/corpus")
+        text = (ROOT / ".github" / "workflows" / "link-benchmark.yml").read_text()
+        self.assertIn("path: build-perf/corpus", text)
+
     def test_artifact_jobs_have_a_directory(self):
         for job in ci_jobs.JOBS.values():
             if job.artifact_key:
