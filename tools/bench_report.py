@@ -316,6 +316,21 @@ def chart_cells(latest: dict) -> dict[tuple[str, str], dict[str, dict]]:
     return chosen
 
 
+# A measurement is too noisy to derive anything from when either linker's wall
+# IQR exceeds this fraction of its median, or the paired-speedup IQR is wider
+# than NOISY_SPEEDUP_IQR percentage points (#38: a hosted runner can go bimodal).
+NOISY_WALL_IQR = 0.25
+NOISY_SPEEDUP_IQR = 25.0
+
+
+def cell_is_noisy(cell: dict) -> bool:
+    for side, _ in SIDES:
+        data = cell[side]
+        if data["wall_ms_q3"] - data["wall_ms_q1"] > NOISY_WALL_IQR * data["wall_ms"]:
+            return True
+    return cell["speedup_percent_q3"] - cell["speedup_percent_q1"] > NOISY_SPEEDUP_IQR
+
+
 def pdb_is_visible(pair: dict[str, dict]) -> bool:
     """The PDB segment is drawn only when it clears run-to-run noise on both sides:
     the PDB cell's q1 above the no-PDB cell's q3, for stock and for llvm-ld."""
@@ -427,7 +442,8 @@ def link_speed_svg(latest: dict) -> bytes:
                 )
                 parts.append(svg_text(x_of(value), axis_y + 13, fmt_tick(value), fill=INK["axis"], size=10, anchor="middle"))
 
-            visible = pdb_is_visible(pair)
+            noisy = cell_is_noisy(pair["nopdb"]) or cell_is_noisy(pair["pdb"])
+            visible = not noisy and pdb_is_visible(pair)
             for index, (side, _) in enumerate(SIDES):
                 by = ry + 22 + index * (BAR_HEIGHT + BAR_GAP)
                 total = pair["pdb"][side]["wall_ms"]
@@ -450,7 +466,9 @@ def link_speed_svg(latest: dict) -> bytes:
                     # Bold digits run wider than the plain-text advance.
                     parts.append(svg_text(x_of(total) + 14 + CHAR_ADVANCE_12PX * 1.1 * len(label), by + 14,
                                           f"{change:+.0f}%", fill=INK["candidate"], size=12, weight="700"))
-            if visible:
+            if noisy:
+                note = "timing noisy on this runner: split not shown"
+            elif visible:
                 pdb_stock = pair["pdb"]["baseline"]["wall_ms"] - pair["nopdb"]["baseline"]["wall_ms"]
                 pdb_ours = pair["pdb"]["candidate"]["wall_ms"] - pair["nopdb"]["candidate"]["wall_ms"]
                 # The link-only change is reported only when its paired IQR
@@ -715,6 +733,11 @@ def load_cells(cells_dir: Path) -> list[dict]:
                 "rss_delta_percent": round(float(raw["rss_delta_percent"]), 3),
                 "candidate": side(raw["candidate"]),
                 "baseline": side(raw["baseline"]),
+                # Raw per-link wall times in execution order, for diagnosing noisy cells.
+                "samples_ms": {
+                    name: [round(float(v), 3) for v in values]
+                    for name, values in sorted(raw.get("samples_ms", {}).items())
+                },
                 "gate": {
                     "exe_sha256": gate["exe"],
                     "pdb_sha256": gate["pdb"],
