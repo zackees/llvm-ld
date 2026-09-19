@@ -126,7 +126,7 @@ GATE = [
     ("thinlto", "small", "pdb"),
 ]
 TIMING = ("release", "medium", "pdb")
-TIMING_PAIRS = 5
+TIMING_PAIRS = 9
 
 
 def pgo_toolchain(host: Host) -> list[str]:
@@ -141,8 +141,12 @@ def pgo_toolchain(host: Host) -> list[str]:
     return ["-DCMAKE_C_COMPILER=clang", "-DCMAKE_CXX_COMPILER=clang++"]  # Apple clang
 
 
-def windows_profile_runtime(host: Host) -> str:
-    """clang's profile runtime library, which lld-link needs explicitly (CMake links with lld-link)."""
+def windows_profile_runtime(host: Host, into: Path) -> str:
+    """clang's profile runtime library, which lld-link needs explicitly (CMake links with lld-link).
+
+    It is copied into the build directory first: the runner's LLVM lives under
+    "C:\\Program Files", and a path with a space does not survive LDFLAGS.
+    """
     resource = subprocess.run(["clang-cl", "-print-resource-dir"], capture_output=True, text=True,
                               check=True).stdout.strip()
     arch = "aarch64" if host.triple.startswith("aarch64") else "x86_64"
@@ -150,7 +154,10 @@ def windows_profile_runtime(host: Host) -> str:
     matching = [c for c in candidates if arch in c or f"{arch}-pc-windows-msvc" in c]
     if not matching:
         raise SystemExit(f"release_build: no clang_rt.profile library for {arch} under {resource}: {candidates}")
-    return matching[0]
+    into.mkdir(parents=True, exist_ok=True)
+    copy = into / "clang_rt.profile.lib"
+    shutil.copy2(matching[0], copy)
+    return str(copy.resolve())
 
 
 def pgo_env(host: Host, stage: str, profile: Path) -> dict[str, str]:
@@ -158,7 +165,7 @@ def pgo_env(host: Host, stage: str, profile: Path) -> dict[str, str]:
     if stage == "generate":
         cflags = f"-fprofile-generate={profile}"
         if host.os == "windows":
-            ldflags = windows_profile_runtime(host)
+            ldflags = windows_profile_runtime(host, profile.parent)
         else:
             ldflags = cflags
     else:
@@ -194,12 +201,31 @@ def link_args(threads: int, variant: str) -> list[str]:
             *(PDB_FLAGS if variant == "pdb" else [])]
 
 
+def child_cpu_seconds() -> float | None:
+    """CPU time of finished children so far (None where the OS does not report it)."""
+    try:
+        import resource
+    except ImportError:  # Windows
+        return None
+    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return usage.ru_utime + usage.ru_stime
+
+
 def link(host: Host, directory: Path, corpus: Path, threads: int, variant: str, env: dict | None = None) -> float:
+    return link_timed(host, directory, corpus, threads, variant, env)[0]
+
+
+def link_timed(host: Host, directory: Path, corpus: Path, threads: int, variant: str,
+               env: dict | None = None) -> tuple[float, float | None]:
+    """(wall seconds, CPU seconds or None) of one link through `directory`'s runner."""
     runner = directory / host.runner
+    cpu_before = child_cpu_seconds()
     start = time.perf_counter()
     subprocess.run([str(runner), *link_args(threads, variant)], cwd=corpus, check=True,
                    env=env or library_env(host, directory), stdout=subprocess.DEVNULL)
-    return time.perf_counter() - start
+    wall = time.perf_counter() - start
+    cpu_after = child_cpu_seconds()
+    return wall, (None if cpu_before is None else cpu_after - cpu_before)
 
 
 def build(host: Host, build_dir: Path, toolchain: list[str] | None, env: dict[str, str] | None) -> None:
@@ -271,13 +297,19 @@ def gate(host: Host, new_dir: Path, reference_dir: Path, corpus_root: Path) -> s
         print(f"gate ok: {mode}/{profile}/{variant} byte-identical to the reference", flush=True)
     mode, profile, variant = TIMING
     corpus = corpus_root / mode / profile
-    ratios = []
+    link(host, reference_dir, corpus, 4, variant)  # warm the page cache for both sides
+    link(host, new_dir, corpus, 4, variant)
+    wall_ratios, cpu_ratios = [], []
     for pair in range(TIMING_PAIRS):
         order = [reference_dir, new_dir] if pair % 2 == 0 else [new_dir, reference_dir]
-        times = {d: link(host, d, corpus, 4, variant) for d in order}
-        ratios.append(times[new_dir] / times[reference_dir])
+        times = {d: link_timed(host, d, corpus, 4, variant) for d in order}
+        wall_ratios.append(times[new_dir][0] / times[reference_dir][0])
+        if times[new_dir][1] and times[reference_dir][1]:
+            cpu_ratios.append(times[new_dir][1] / times[reference_dir][1])
+    cpu_text = (f", {100 * (statistics.median(cpu_ratios) - 1):+.1f}% CPU" if cpu_ratios else "")
     summary = (f"{host.triple}: {mode}/{profile} + PDB at 4 threads, new vs previous release: "
-               f"{100 * (1 - statistics.median(ratios)):+.1f}% wall (paired median of {TIMING_PAIRS})")
+               f"{100 * (1 - statistics.median(wall_ratios)):+.1f}% faster wall{cpu_text} "
+               f"(paired median of {TIMING_PAIRS}; hosted runners are noisy)")
     print(summary, flush=True)
     return summary
 

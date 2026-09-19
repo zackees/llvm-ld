@@ -140,6 +140,7 @@ class PgoTest(unittest.TestCase):
             self._fake_runner(root / "new", "same")
             summary = release_build.gate(host, root / "new", root / "ref", corpora)
             self.assertIn("new vs previous release", summary)
+            self.assertIn("% CPU", summary)
             self._fake_runner(root / "bad", "different")
             with self.assertRaises(SystemExit) as caught:
                 release_build.gate(host, root / "bad", root / "ref", corpora)
