@@ -58,6 +58,9 @@ jobs:
           if [ "${{ matrix.kind }}" = linux ]; then sudo apt-get update && sudo apt-get install -y ninja-build; else brew install ninja; fi
           extra=()
           if [ -n "${{ matrix.osx_arch }}" ]; then extra+=("-DCMAKE_OSX_ARCHITECTURES=${{ matrix.osx_arch }}"); fi
+          # audit_build.py reads CMake's codemodel reply, which configure only writes when this
+          # query file already exists (as ci.yml does).
+          mkdir -p build/.cmake/api/v1/query && touch build/.cmake/api/v1/query/codemodel-v2
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_APPEND_VC_REV=OFF \
             -DLLVM_LD_ENABLE_PPROF=OFF -DLLVM_LD_ENABLE_DHAT=OFF "${extra[@]}" \
             --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace.jsonl
@@ -72,7 +75,10 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm -v "$PWD:/src" -w /src alpine:3.20 sh -euc '
-            apk add --no-cache build-base cmake ninja python3 linux-headers git
+            apk add --no-cache build-base cmake python3 py3-pip linux-headers git
+            # Alpine'"'"'s ninja has no `-t inputs`, which the audit needs.
+            python3 -m venv /tmp/tools && /tmp/tools/bin/pip install --quiet ninja && export PATH=/tmp/tools/bin:$PATH
+            mkdir -p build/.cmake/api/v1/query && touch build/.cmake/api/v1/query/codemodel-v2
             cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_APPEND_VC_REV=OFF \
               -DLLVM_LD_ENABLE_PPROF=OFF -DLLVM_LD_ENABLE_DHAT=OFF \
               --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace.jsonl
