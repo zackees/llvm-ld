@@ -691,6 +691,7 @@ def release_build_in_alpine(common: list[str]) -> None:
         subprocess.run([zccache, "stop"], capture_output=True)
         mounts = ["-v", f"{Path(zccache).parent}:/opt/zccache:ro", "-v", f"{cache_root}:/zccache-cache"]
         env = ["-e", "ZCCACHE_CACHE_DIR=/zccache-cache",
+               *(f"-e{key}={value}" for key, value in ZCCACHE_ENV.items()),
                "-e", "PATH=/opt/zccache:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"]
         launcher = "zccache"
     script = ("apk add --no-cache build-base cmake ninja python3 linux-headers git clang lld llvm compiler-rt && "
