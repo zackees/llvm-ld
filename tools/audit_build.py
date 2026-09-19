@@ -51,7 +51,12 @@ def main() -> int:
     vcs_dir=(source/".git").resolve()
     mimalloc_manifest=json.loads((source/"provenance"/"mimalloc-pprof-files.json").read_text(encoding="utf-8"))
     libxml2_manifest=json.loads((source/"provenance"/"libxml2-files.json").read_text(encoding="utf-8"))
+    # `ninja -t deps` lists every header once per translation unit (~1M lines for ~4k distinct
+    # files), so each path is resolved and hashed once; the inventory is identical either way.
+    recorded=set()
     def record(candidate: pathlib.Path, context: str) -> None:
+        if candidate in recorded: return
+        recorded.add(candidate)
         if inside(candidate,vcs_dir) and candidate.suffix.lower() not in SOURCE_SUFFIXES: return
         if candidate in allowed_files:
             inventory[f"project/{candidate.name}"]=hashlib.sha256(candidate.read_bytes()).hexdigest()
@@ -82,9 +87,13 @@ def main() -> int:
         if candidate.exists() and candidate.is_file() and (inside(candidate,source) or inside(candidate,build)):
             record(candidate,"build source read")
     if a.ninja_deps:
+        seen=set()
         for raw in a.ninja_deps.read_text(encoding="utf-8",errors="replace").splitlines():
             if not raw[:1].isspace(): continue
-            candidate=pathlib.Path(raw.strip())
+            raw=raw.strip()
+            if raw in seen: continue
+            seen.add(raw)
+            candidate=pathlib.Path(raw)
             if not candidate.is_absolute(): candidate=build/candidate
             candidate=candidate.resolve()
             if candidate.is_file() and (inside(candidate,source) or inside(candidate,build)):

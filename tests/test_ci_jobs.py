@@ -30,7 +30,8 @@ class JobTableTest(unittest.TestCase):
         self.assertEqual(sorted(used - set(ci_jobs.JOBS)), [])
 
     def test_no_workflow_uses_sccache_or_the_old_templates(self):
-        for workflow in (ROOT / ".github" / "workflows").glob("link-benchmark.yml"):
+        migrated = ("link-benchmark.yml", "ci.yml", "correctness.yml", "benchmark.yml")
+        for workflow in (ROOT / ".github" / "workflows" / name for name in migrated):
             text = workflow.read_text()
             for gone in ("sccache", "zccache-build", "pgo-setup", "record-timing"):
                 self.assertNotIn(gone, text, f"{workflow.name} still mentions {gone}")
@@ -60,6 +61,24 @@ class CachePolicyTest(unittest.TestCase):
         self.assertFalse(ci_jobs.is_warm({"status": "ok", "hits": 10, "misses": 1}))
         self.assertFalse(ci_jobs.is_warm({"status": "error"}))
         self.assertFalse(ci_jobs.is_warm(None))
+
+
+class FloorTest(unittest.TestCase):
+    job = ci_jobs.Job("t-floor", lambda args: None, warm_max_minutes=5)
+
+    def test_warm_run_over_the_floor_fails(self):
+        self.assertIn("> floor 5", ci_jobs.check_floor(self.job, {"job": "x", "seconds": 400, "warm": True}))
+
+    def test_cold_run_over_the_floor_is_only_reported(self):
+        self.assertIsNone(ci_jobs.check_floor(self.job, {"job": "x", "seconds": 4000, "warm": False}))
+
+    def test_warm_run_under_the_floor_passes(self):
+        self.assertIsNone(ci_jobs.check_floor(self.job, {"job": "x", "seconds": 200, "warm": True}))
+
+    def test_every_build_job_outside_link_benchmark_has_a_floor(self):
+        for job in ci_jobs.JOBS.values():
+            if job.cache_group and not job.name.startswith("bench-"):
+                self.assertIsNotNone(job.warm_max_minutes, job.name)
 
 
 class RunnerTest(unittest.TestCase):
@@ -126,6 +145,16 @@ class RunnerTest(unittest.TestCase):
             os.environ.pop("ZCCACHE_DISABLE", None)
             status, _ = self.run_job(job)
         self.assertEqual(status, 1)
+
+    def test_post_phase_adds_its_time_to_the_record(self):
+        job = ci_jobs.Job("t-post", lambda args: None, post=lambda args: None)
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"RUNNER_TEMP": tmp, "GITHUB_OUTPUT": "", "GITHUB_STEP_SUMMARY": ""}), \
+                mock.patch.dict(ci_jobs.JOBS, {job.name: job}):
+            self.assertEqual(ci_jobs.main(["run", job.name]), 0)
+            self.assertEqual(ci_jobs.main(["post", job.name]), 0)
+            record = json.loads(next(pathlib.Path(tmp, "timing").glob("*.json")).read_text())
+        self.assertTrue(record["warm"])
 
     def test_measurement_only_job_is_warm(self):
         job = ci_jobs.Job("t-measure", lambda args: None)
