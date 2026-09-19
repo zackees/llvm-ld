@@ -138,7 +138,7 @@ jobs:
 
   measure:
     runs-on: ubuntu-24.04
-    timeout-minutes: 240
+    timeout-minutes: 360
     needs: precheck
     if: needs.precheck.outputs.should_run == 'true'
     permissions:
@@ -242,8 +242,9 @@ jobs:
               >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      # Always: the optimized candidate (PGO + BOLT) is built in this job even
+      # when the plain linkers come prebuilt from ci.yml.
       - uses: mozilla-actions/sccache-action@v0.0.11
-        if: steps.prebuilt.outputs.found != 'true'
 
       # The site shows only the current run, so nothing is read from the prior
       # publication; its commit is recorded for publish-branch's
@@ -341,6 +342,28 @@ jobs:
           # downstream reads the build tree, so rebuilding the candidate here
           # was dead work (this folds in the one substantive change from
           # PR #18).
+
+      # The published candidate is llvm-ld built the way it is meant to be fast:
+      # the link-speed patches plus PGO, ThinLTO and BOLT (tools/pgo_build.py all
+      # --bolt, #42/#43 and the codegen rounds). The baseline above stays stock lld
+      # built plain (-O3), so the chart shows what llvm-ld buys over stock lld,
+      # and both labels on the chart say exactly that. The byte-identity gate in
+      # bench.py still applies to every cell, so neither PGO nor BOLT can have
+      # changed the output.
+      - name: build the optimized candidate (patches + PGO + ThinLTO + BOLT)
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y lld llvm libclang-rt-dev bolt-18
+          BOLT_DIR=/usr/lib/llvm-18/bin
+          test -x "$BOLT_DIR/llvm-bolt" || { echo "::error::llvm-bolt not found in $BOLT_DIR"; exit 1; }
+          clang --version | head -1; llvm-profdata --version | grep -i version
+          python3 tools/pgo_build.py all --bolt --bolt-dir "$BOLT_DIR" --launcher sccache \
+            --instr-dir "$RUNNER_TEMP/build-pgo-instr" --out-dir "$RUNNER_TEMP/build-pgo"
+          cp "$RUNNER_TEMP/build-pgo/llvm-ld-direct" "$RUNNER_TEMP/bin/candidate"
+          echo "candidate: llvm-ld-direct built with patches + PGO + ThinLTO + BOLT" >> "$GITHUB_STEP_SUMMARY"
 
       # The guard in bench.py would catch this too, but failing here points
       # at the real cause instead of at the measurement. Unconditional so it

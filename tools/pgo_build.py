@@ -20,6 +20,13 @@ Stages (each a subcommand; `all` runs them in order):
   optimize    configure + build <out-dir> with -fprofile-use=<profdata> and
               -flto=thin on every compile, and -flto=thin -fuse-ld=lld on links
               (llvm-ar/llvm-ranlib, because the static libraries hold bitcode).
+              With --bolt it also keeps relocations (--emit-relocs) for BOLT.
+  bolt        post-link layout optimization of <out-dir>/llvm-ld-direct with
+              llvm-bolt (Linux): instrument, train on the same workload, merge,
+              then reorder blocks/functions and split hot/cold code (no ICF).
+              Measured +6.1% wall / -5.5% CPU on top of PGO for a
+              ThinLTO link, byte-identical output (codegen round 2). The pre-BOLT
+              binary is kept as llvm-ld-direct.pre-bolt.
 
 The configure flags are tools/ci_build.py's (Release, clang, LLVM_APPEND_VC_REV=OFF)
 plus the PGO/LTO flags, so the two builds differ only in how they are compiled.
@@ -30,6 +37,7 @@ so the result is not an artifact of training on the benchmark.
 
 Usage:
   python tools/pgo_build.py all [--instr-dir build-pgo-instr] [--out-dir build-pgo] [--nice 10]
+  python tools/pgo_build.py all --bolt [--bolt-dir <dir with llvm-bolt>]   # + BOLT (Linux)
   python tools/pgo_build.py plain [--plain-dir build-plain]
   python tests/perf/bench.py --candidate build-pgo/llvm-ld-direct \
       --baseline build-plain/llvm-ld-direct --corpus <corpus> --variant pdb --threads 4
@@ -96,7 +104,7 @@ def runtime_rpath(cxx: str) -> str | None:
     return match.group(1) if match else None
 
 
-def optimize_flags(profdata: Path, rpath: str | None = None) -> list[str]:
+def optimize_flags(profdata: Path, rpath: str | None = None, bolt: bool = False) -> list[str]:
     compile_flags = " ".join([
         f"-fprofile-use={profdata}",
         # Functions the training never reached are fine; stale/mismatched ones
@@ -105,6 +113,8 @@ def optimize_flags(profdata: Path, rpath: str | None = None) -> list[str]:
         "-flto=thin",
     ])
     link_flags = "-flto=thin -fuse-ld=lld" + (f" -Wl,-rpath,{rpath}" if rpath else "")
+    if bolt:
+        link_flags += " -Wl,--emit-relocs"  # BOLT needs the relocations to move code
     return [
         f"-DCMAKE_C_FLAGS={compile_flags}",
         f"-DCMAKE_CXX_FLAGS={compile_flags}",
@@ -152,7 +162,7 @@ def run(command: list[str], nice: int, **kwargs) -> None:
 
 def build(workspace: Path, build_dir: Path, extra: list[str], args: argparse.Namespace) -> None:
     configure = ci_build.configure_command(
-        workspace, build_dir, "none", args.cc, args.cxx, None, extra_args=extra
+        workspace, build_dir, args.launcher, args.cc, args.cxx, None, extra_args=extra
     )
     run(configure, args.nice, cwd=workspace)
     run(ci_build.build_command(build_dir, [TARGET]), args.nice, cwd=workspace)
@@ -204,8 +214,57 @@ def cmd_optimize(args: argparse.Namespace) -> int:
     profdata = args.instr_dir.resolve() / PROFDATA_NAME
     if not profdata.exists():
         raise SystemExit(f"{profdata} missing: run `merge` first")
-    build(args.workspace, args.out_dir, optimize_flags(profdata, runtime_rpath(args.cxx)), args)
+    build(args.workspace, args.out_dir, optimize_flags(profdata, runtime_rpath(args.cxx), args.bolt), args)
     print(f"built {args.out_dir / TARGET}")
+    return 0
+
+
+BOLT_OPTIMIZE_FLAGS = [
+    "-reorder-blocks=ext-tsp", "-reorder-functions=cdsort", "-split-functions",
+    "-split-all-cold", "-split-eh", "-use-gnu-stack",
+    # No -icf: folding identical functions can break code that compares function
+    # pointers (the output gate would not catch that), BOLT 18 has no "safe" mode
+    # (its -icf is a boolean), and the layout, not the ~280 KB folding, is the gain.
+]
+
+
+def bolt_tool(name: str, bolt_dir: Path | None) -> str:
+    path = str(bolt_dir / name) if bolt_dir else shutil.which(name)
+    if not path:
+        raise SystemExit(f"{name} not found (pass --bolt-dir)")
+    return path
+
+
+def cmd_bolt(args: argparse.Namespace) -> int:
+    out = args.out_dir.resolve()
+    binary = out / TARGET
+    pre = out / (TARGET + ".pre-bolt")
+    if not binary.exists():
+        raise SystemExit(f"{binary} missing: run `optimize --bolt` first")
+    shutil.copy2(binary, pre)
+    llvm_bolt = bolt_tool("llvm-bolt", args.bolt_dir)
+    work = out / "bolt"
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir()
+    instrumented = work / "instrumented"
+    run([llvm_bolt, str(pre), "-instrument", "-o", str(instrumented),
+         f"--instrumentation-file={work / 'prof.fdata'}", "--instrumentation-file-append-pid"], 0,
+        stdout=subprocess.DEVNULL)
+    corpus_root = args.instr_dir.resolve() / "train-corpus"
+    for corpus, extra in training_links(corpus_root):
+        run([str(instrumented), "winlink", "lld-link", "@link.rsp", "/out:train.exe", *extra],
+            args.nice, cwd=corpus, stdout=subprocess.DEVNULL)
+    parts = sorted(work.glob("prof.fdata.*"))
+    if not parts:
+        raise SystemExit("BOLT training produced no profile")
+    merged = work / "merged.fdata"
+    with open(merged, "wb") as out_file:
+        subprocess.run([bolt_tool("merge-fdata", args.bolt_dir), *map(str, parts)], check=True,
+                       stdout=out_file, stderr=subprocess.DEVNULL)
+    run([llvm_bolt, str(pre), "-o", str(binary), f"-data={merged}", *BOLT_OPTIMIZE_FLAGS], 0,
+        stdout=subprocess.DEVNULL)
+    shutil.rmtree(work)
+    print(f"BOLT-optimized {binary} (pre-BOLT kept as {pre.name})")
     return 0
 
 
@@ -216,28 +275,34 @@ def cmd_plain(args: argparse.Namespace) -> int:
 
 
 def cmd_all(args: argparse.Namespace) -> int:
-    for step in (cmd_instrument, cmd_train, cmd_merge, cmd_optimize):
+    steps = [cmd_instrument, cmd_train, cmd_merge, cmd_optimize] + ([cmd_bolt] if args.bolt else [])
+    for step in steps:
         step(args)
     return 0
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("command", choices=["instrument", "train", "merge", "optimize", "plain", "all"])
+    parser.add_argument("command", choices=["instrument", "train", "merge", "optimize", "bolt", "plain", "all"])
     parser.add_argument("--workspace", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--instr-dir", type=Path, default=Path("build-pgo-instr"))
     parser.add_argument("--out-dir", type=Path, default=Path("build-pgo"))
     parser.add_argument("--plain-dir", type=Path, default=Path("build-plain"))
+    parser.add_argument("--bolt", action="store_true",
+                        help="optimize keeps relocations; all also runs the bolt stage (Linux)")
+    parser.add_argument("--bolt-dir", type=Path, help="directory holding llvm-bolt and merge-fdata")
     parser.add_argument("--cc", default="clang")
     parser.add_argument("--cxx", default="clang++")
     parser.add_argument("--nice", type=int, default=0, help="run builds and training under nice -n N")
+    parser.add_argument("--launcher", default="none",
+                        help="compiler launcher (e.g. sccache in CI); 'none' by default")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     handler = {"instrument": cmd_instrument, "train": cmd_train, "merge": cmd_merge,
-               "optimize": cmd_optimize, "plain": cmd_plain, "all": cmd_all}[args.command]
+               "optimize": cmd_optimize, "bolt": cmd_bolt, "plain": cmd_plain, "all": cmd_all}[args.command]
     return handler(args)
 
 
