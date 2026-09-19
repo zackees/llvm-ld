@@ -690,15 +690,25 @@ def release_build_in_alpine(common: list[str]) -> None:
         Path(cache_root).mkdir(parents=True, exist_ok=True)
         subprocess.run([zccache, "stop"], capture_output=True)
         mounts = ["-v", f"{Path(zccache).parent}:/opt/zccache:ro", "-v", f"{cache_root}:/zccache-cache"]
-        env = ["-e", "ZCCACHE_CACHE_DIR=/zccache-cache",
+        # The container's daemon logs to the checkout, so a failure shows zccache's side of it.
+        env = ["-e", "ZCCACHE_CACHE_DIR=/zccache-cache", "-e", "ZCCACHE_LOG_FILE=/src/zccache-daemon.log",
                *(f"-e{key}={value}" for key, value in ZCCACHE_ENV.items()),
+               # Set by call_with_bypass_retry on the retry.
+               *(["-e", "ZCCACHE_DISABLE=1"] if os.environ.get("ZCCACHE_DISABLE") == "1" else []),
                "-e", "PATH=/opt/zccache:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"]
         launcher = "zccache"
     script = ("apk add --no-cache build-base cmake ninja python3 linux-headers git clang lld llvm compiler-rt && "
               "clang --version && python3 " + " ".join(shlex.quote(a) for a in common) + f" --launcher {launcher}")
+    daemon_log = ROOT / "zccache-daemon.log"
     try:
         sh(["docker", "run", "--rm", "-v", f"{ROOT}:/src", "-w", "/src", *mounts, *env,
             "-e", "GITHUB_STEP_SUMMARY=/src/step-summary.md", "alpine:3.20", "sh", "-euc", script])
+    except subprocess.CalledProcessError:
+        if daemon_log.exists():
+            log("::group::zccache daemon log (last 200 lines)")
+            log("\n".join(daemon_log.read_text(errors="replace").splitlines()[-200:]))
+            log("::endgroup::")
+        raise
     finally:
         uid_gid = f"{os.getuid()}:{os.getgid()}"
         sh(["sudo", "chown", "-R", uid_gid, str(ROOT)])
@@ -708,6 +718,8 @@ def release_build_in_alpine(common: list[str]) -> None:
         if note.exists():
             summary(note.read_text())
             note.unlink()
+        for rotated in ROOT.glob("zccache-daemon.log*"):
+            rotated.unlink()
 
 
 JOBS: dict[str, Job] = {job.name: job for job in [
