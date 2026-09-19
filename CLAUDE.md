@@ -278,6 +278,35 @@ cross-module optimization; modules keep their compile-time `-O2`). `tests/tier2_
 opt-in (a payload patch with no upstream flag) needs its own issue meeting rule 3, plus a CI check
 that it is off by default.
 
+## PGO + ThinLTO build of the linker (#42, #43)
+
+`tools/pgo_build.py` compiles llvm-ld-direct better without changing what it does:
+`instrument` (build with `-fprofile-generate` on every compile and link, set at the top level
+because `LLVM_BUILD_INSTRUMENTED` misses the final llvm-ld-direct link), `train` (link the
+debug/release small+medium and ThinLTO small corpora, both variants), `merge` (`llvm-profdata`
+must match clang's major version), `optimize` (`-fprofile-use` + `-flto=thin`, lld, llvm-ar), and
+`plain` (the control: same flags minus PGO/LTO). About 25 min per build on 16 threads.
+
+```
+python tools/pgo_build.py all --nice 10 && python tools/pgo_build.py plain
+python tests/perf/bench.py --candidate build-pgo/llvm-ld-direct --baseline build-plain/llvm-ld-direct \
+  --corpus build-perf/corpus/release/large --variant pdb --threads 4
+```
+
+Measured 2026-09-18 on held-out corpora (the profile never saw them), `/threads:4`, paired, every
+cell byte-identical to the plain build (so PGO provably changes no output): ThinLTO medium + PDB
+**+37.6% wall, -37% CPU** (197 s -> 123 s); Debug large + PDB +13.7% (CPU -16%); Release large +
+PDB +12.0% (CPU -17%); no-PDB links +9..13%; peak RSS unchanged or slightly lower. A trained
+corpus (Release medium + PDB, +14.4%) matched the held-out ones, so the profile is not overfit.
+
+- Hotspot profile behind the choice (on #43): PDB links and ThinLTO have flat profiles (no
+  function above ~7%), which is where PGO/LTO of the binary pays; no-PDB links are ~50% kernel.
+- NixOS: `-fuse-ld=lld` bypasses the cc-wrapper, so `optimize` probes a normally linked C++
+  program's RUNPATH and repeats it (`runtime_rpath`); elsewhere the probe finds none.
+- The `link-benchmark` charts stay non-PGO on both sides: they measure the link-speed patches, and
+  a PGO candidate against a plain baseline would mix in compiler-flag gains (#42). Shipping PGO in
+  user-facing builds is #44.
+
 ## CI build script and build-tree cache (#21)
 
 ci.yml's `build-linux` never runs cmake inline; it calls `tools/ci_build.py` (stdlib only) so the

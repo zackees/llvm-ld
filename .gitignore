@@ -1,4 +1,8 @@
 /build/
+# tools/pgo_build.py (#43): instrumented build, PGO+ThinLTO build, and the plain control build.
+/build-pgo-instr/
+/build-pgo/
+/build-plain/
 /llvm-project.materialize-tmp/
 /upstream/
 !/upstream/.gitkeep
