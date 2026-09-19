@@ -250,7 +250,12 @@ zccache will not cache a cl/clang-cl compile that names a PDB side output (`/Fd`
 Ninja rule passes `/Fd<target>.pdb` to every such compile, so every Windows and cross compile was
 non-cacheable (PR #48's cross build: 0 hits, 1685 non-cacheable). The root `CMakeLists.txt` drops
 `/Fd` from the rule in Release builds without `/Zi`, where no PDB is written and the object is
-unchanged. Check `non_cacheable` in a job's zccache stats before assuming a cache works.
+unchanged. LLVM also disables precompiled headers only for sccache/ccache launchers, so under
+zccache PCH came back on and every cl/clang-cl PCH compile was non-cacheable too; the root
+`CMakeLists.txt` (and the standalone tablegen configures) disable PCH under zccache. Check
+`non_cacheable` in a job's zccache stats before assuming a cache works. The intermittent exit 113
+is a compile killed with SIGTERM (-143) inside zccache, reported upstream as zackees/zccache#1603;
+the bypass retry absorbs it.
 release.yml (#58) runs `release-corpus` and `release-build`
 (cache group `release-<triple>`) through it too; tags and PRs restore what main saves, and a
 weekly scheduled run on main keeps those caches warm (skipped when main has not moved). The PGO
