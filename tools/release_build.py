@@ -166,6 +166,10 @@ def pgo_env(host: Host, stage: str, profile: Path) -> dict[str, str]:
         cflags = f"-fprofile-generate={profile}"
         if host.os == "windows":
             ldflags = windows_profile_runtime(host, profile.parent)
+        elif host.os == "linux":
+            # lld for the instrumented link too: with the default GNU ld the instrumented
+            # library's final link stalled the aarch64 runner until the 6-hour timeout.
+            ldflags = f"{cflags} -fuse-ld=lld"
         else:
             ldflags = cflags
     else:
