@@ -184,9 +184,23 @@ unchanged commit would only add runner noise to the published numbers.
 
 ### Where the binaries come from
 
-link-benchmark takes the **baseline** from ci.yml (below) and always builds the **candidate** itself
-with `tools/pgo_build.py all --bolt` (patches + PGO + ThinLTO + BOLT, sccache-backed; the measure
-job timeout is 360 min for that). The plain candidate in the ci.yml artifact is no longer measured. `ci.yml`'s `build-linux` job, on push to
+link-benchmark is split into cached sub-jobs (#50): `corpus`, `plain` (the stock baseline: waits
+up to 45 min for ci.yml's artifact for the SHA, else builds in-job) and `pgo-instr` run in
+parallel; `pgo-opt` builds the candidate (patches + PGO + ThinLTO + BOLT); `cells` is a matrix
+(debug/release/thinlto) measuring in parallel; `measure` renders; `floors` checks the floors last.
+Shared logic is in local composite actions: `.github/actions/pgo-setup` (toolchain, exact-input
+key `tools/bench_ci.py pgo-key`, cached final binary), `zccache-build` (a build under the job's own
+zccache cache with a stats session that decides warm = 0 misses) and `record-timing`. The
+optimized binary and its profile are cached under the exact-input key (payload closure, CMake,
+first-party C/C++, pgo_build.py, gen_corpus.py, clang and BOLT versions): a main commit that
+touches none of them skips both PGO jobs. The old single job took 126 min (run 35451964051: the
+profile was rebuilt every run, so the optimized build was always cold).
+
+Floors (`tools/bench_floors.json`, `tools/bench_ci.py floors`): CI time (whole run <= 30 min,
+per-job limits) is enforced **only on warm runs**; link speed (per-cell minimum speedups at the
+peak thread count, noisy cells skipped) and at most 2 noisy cells on every run. The `floors` job
+runs after publish/deploy with `if: always()`, so a violation fails the workflow at the end but
+never stops the charts from updating. Raise a floor only with evidence from several runs. `ci.yml`'s `build-linux` job, on push to
 `main` only (never on PRs), after its closure audit and `ctest`, copies `build/llvm-ld-direct`
 aside as the candidate, checks the link-speed payload files out at `BASELINE_REF`, rebuilds
 incrementally, copies the baseline, and restores the files (no third rebuild). It then uploads

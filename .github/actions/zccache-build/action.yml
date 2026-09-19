@@ -1,0 +1,61 @@
+name: zccache-build
+description: >-
+  Run a C++ build command under this job's own zccache compile cache (#50): restore the
+  job's cache directory, wrap the command in a zccache stats session, save the cache, and
+  report whether the job was warm (every compile a cache hit). Shared by the build nodes.
+inputs:
+  job:
+    description: job name; each job keeps its own zccache cache (zccache-<job>-...)
+    required: true
+  key:
+    description: exact-input key; an exact cache match restores a fully warm cache
+    required: true
+  run:
+    description: the build command (it must use zccache as the compiler launcher)
+    required: true
+outputs:
+  warm:
+    description: "true when every compile was a cache hit"
+    value: ${{ steps.end.outputs.warm }}
+  stats:
+    description: path to the zccache session stats JSON
+    value: ${{ steps.end.outputs.stats }}
+runs:
+  using: composite
+  steps:
+    - name: restore this job's zccache
+      id: restore
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.zccache
+        key: zccache-${{ inputs.job }}-${{ inputs.key }}
+        restore-keys: zccache-${{ inputs.job }}-
+    - name: build under a zccache stats session
+      shell: bash
+      env:
+        BUILD: ${{ inputs.run }}
+      run: |
+        set -euo pipefail
+        SID=$(python3 tools/bench_ci.py zc-start)
+        echo "ZCCACHE_SESSION_ID=$SID" >> "$GITHUB_ENV"
+        export ZCCACHE_SESSION_ID=$SID
+        bash -euo pipefail -c "$BUILD"
+    - name: end the zccache session
+      id: end
+      if: always()
+      shell: bash
+      run: |
+        set -euo pipefail
+        stats="$RUNNER_TEMP/zccache-stats-${{ inputs.job }}.json"
+        python3 tools/bench_ci.py zc-end --session "$ZCCACHE_SESSION_ID" --out "$stats"
+        warm=$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print('true' if d.get('status') == 'ok' and d.get('misses', 1) == 0 else 'false')" "$stats")
+        echo "warm=$warm" >> "$GITHUB_OUTPUT"
+        echo "stats=$stats" >> "$GITHUB_OUTPUT"
+        echo "zccache ${{ inputs.job }}: $(cat "$stats" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('hits'), 'hits,', d.get('misses'), 'misses')") (warm=$warm)" >> "$GITHUB_STEP_SUMMARY"
+        zccache stop >/dev/null 2>&1 || true
+    - name: save this job's zccache
+      if: steps.restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.zccache
+        key: zccache-${{ inputs.job }}-${{ inputs.key }}

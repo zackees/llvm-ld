@@ -1,0 +1,36 @@
+name: pgo-setup
+description: >-
+  Shared setup of the PGO build nodes (#50): install the clang/lld/llvm-profdata/BOLT
+  toolchain and zccache, compute the exact-input key of the optimized llvm-ld-direct, and
+  restore the cached final result (profile + PGO/BOLT binary) if that key was built before.
+outputs:
+  key:
+    description: exact-input key (tools/bench_ci.py pgo-key)
+    value: ${{ steps.key.outputs.key }}
+  final-hit:
+    description: "true when the optimized binary for this key is already cached"
+    value: ${{ steps.final.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - name: toolchain (clang, lld, llvm-profdata, BOLT) and zccache
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq lld llvm libclang-rt-dev bolt-18 >/dev/null
+        test -x /usr/lib/llvm-18/bin/llvm-bolt || { echo "::error::llvm-bolt missing"; exit 1; }
+        pipx install zccache==1.14.0 >/dev/null
+        echo "$(pipx environment --value PIPX_BIN_DIR)" >> "$GITHUB_PATH"
+    - name: exact-input key
+      id: key
+      shell: bash
+      run: |
+        python3 tools/bench_ci.py pgo-key --github-output \
+          --identity "clang --version" --identity "/usr/lib/llvm-18/bin/llvm-bolt --version"
+    - name: restore the cached optimized binary for this key
+      id: final
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/pgo-final
+        key: ${{ steps.key.outputs.key }}
