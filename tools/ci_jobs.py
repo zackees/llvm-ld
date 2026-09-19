@@ -671,18 +671,20 @@ def job_release_build(args: argparse.Namespace) -> None:
               "--train-corpus", "pgo-corpus", "--reference", str(archive)]
     if kind == "musl":
         args.unobserved = True
-        release_build_in_alpine(common)
+        run_in_alpine("build-base cmake ninja python3 linux-headers git clang lld llvm compiler-rt",
+                      "clang --version && python3 " + " ".join(shlex.quote(a) for a in common) + " --launcher {launcher}")
         return
 
     sh([PY, *common, "--launcher", launcher_or_none()])
 
 
-def release_build_in_alpine(common: list[str]) -> None:
+def run_in_alpine(packages: str, script: str) -> None:
     """musl hosts build inside Alpine on the same-architecture runner, so the library links musl
     and its tests run natively. zccache's Linux release binary is static musl, so the host's copy
     runs in the container; the host daemon is stopped first so the container's daemon owns the
     restored cache directory, which the template saves afterwards. Its compiles are not visible
-    to this job's zccache session, so the job is never reported warm."""
+    to this job's zccache session, so callers mark the job unobserved (never warm). In the script,
+    `{launcher}` becomes zccache or none, and `{launcher_value}` zccache or "" (a CMake launcher)."""
     zccache = shutil.which("zccache")
     mounts, env, launcher, cache_root = [], [], "none", ""
     if zccache:
@@ -697,8 +699,8 @@ def release_build_in_alpine(common: list[str]) -> None:
                *(["-e", "ZCCACHE_DISABLE=1"] if os.environ.get("ZCCACHE_DISABLE") == "1" else []),
                "-e", "PATH=/opt/zccache:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"]
         launcher = "zccache"
-    script = ("apk add --no-cache build-base cmake ninja python3 linux-headers git clang lld llvm compiler-rt && "
-              "clang --version && python3 " + " ".join(shlex.quote(a) for a in common) + f" --launcher {launcher}")
+    script = (f"apk add --no-cache {packages} && " +
+              script.replace("{launcher}", launcher).replace("{launcher_value}", "" if launcher == "none" else launcher))
     daemon_log = ROOT / "zccache-daemon.log"
     try:
         sh(["docker", "run", "--rm", "-v", f"{ROOT}:/src", "-w", "/src", *mounts, *env,
@@ -720,6 +722,70 @@ def release_build_in_alpine(common: list[str]) -> None:
             note.unlink()
         for rotated in ROOT.glob("zccache-daemon.log*"):
             rotated.unlink()
+
+
+
+# --- closure-discovery.yml (#59) ------------------------------------------
+
+LLVM_SRC_URL = ("https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.0/"
+                "llvm-project-23.1.0.src.tar.xz")
+
+
+def setup_discover(args: argparse.Namespace) -> None:
+    if "apple" in args.triple:
+        sh(["brew", "install", "ninja"])
+    elif "musl" not in args.triple:
+        apt_install("ninja-build")
+
+
+def discovery_tree() -> None:
+    """Full upstream at the pinned commit, minus the reviewed prune, plus the declared patches
+    (tools/prepare_discovery_tree.py), in place of the committed payload."""
+    sh(["curl", "-fsSL", LLVM_SRC_URL, "-o", "llvm-src.tar.xz"])
+    (ROOT / "upstream").mkdir()
+    sh(["tar", "-xJf", "llvm-src.tar.xz", "-C", "upstream", "--strip-components=1"])
+    sh(["cp", "-a", "llvm-project", "committed-payload"])
+    sh([PY, "tools/prepare_discovery_tree.py", "--upstream", "upstream", "--output", "llvm-project",
+        "--patched-source", "committed-payload"])
+    shutil.rmtree(ROOT / "upstream")
+    (ROOT / "llvm-src.tar.xz").unlink()
+
+
+DISCOVER_BUILD = (
+    # audit_build.py reads CMake's codemodel reply, which configure writes only when this query
+    # file already exists (as ci.yml does).
+    "mkdir -p build/.cmake/api/v1/query && touch build/.cmake/api/v1/query/codemodel-v2 && "
+    "cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_APPEND_VC_REV=OFF "
+    "-DLLVM_LD_ENABLE_PPROF=OFF -DLLVM_LD_ENABLE_DHAT=OFF {extra} "
+    "-DCMAKE_C_COMPILER_LAUNCHER={launcher_value} -DCMAKE_CXX_COMPILER_LAUNCHER={launcher_value} "
+    "--trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace.jsonl && "
+    "cmake --build build --target llvm_ld llvm-ld-runner abi_smoke && "
+    "ninja -C build -t inputs llvm_ld > build-inputs.txt && ninja -C build -t deps > build-deps.txt && "
+    "python3 tools/audit_build.py --source . --build build --ninja-inputs build-inputs.txt "
+    "--ninja-deps build-deps.txt --cmake-trace cmake-trace.jsonl --output closure-{triple}.json"
+)
+
+
+def discover_script(triple: str) -> str:
+    """DISCOVER_BUILD for one host; `{launcher_value}` is left for the caller."""
+    arch = {"aarch64-apple-darwin": "arm64", "x86_64-apple-darwin": "x86_64"}.get(triple)
+    return DISCOVER_BUILD.replace("{extra}", f"-DCMAKE_OSX_ARCHITECTURES={arch}" if arch else "").replace("{triple}", triple)
+
+
+def job_closure_discover(args: argparse.Namespace) -> None:
+    """Derive one host's LLVM source closure: build over the discovery tree and audit what the build
+    read, exactly as ci.yml does (merged later with tools/merge_llvm_closures.py)."""
+    discovery_tree()
+    script = discover_script(args.triple)
+    if "musl" in args.triple:
+        args.unobserved = True
+        # Alpine's ninja has no `-t inputs`, which the audit needs, so pip's ninja is used.
+        run_in_alpine("build-base cmake python3 py3-pip linux-headers git",
+                      "python3 -m venv /tmp/tools && /tmp/tools/bin/pip install --quiet ninja && "
+                      "export PATH=/tmp/tools/bin:$PATH && " + script)
+        return
+    launcher = launcher_or_none()
+    sh(script.replace("{launcher_value}", "" if launcher == "none" else launcher), shell=True)
 
 
 JOBS: dict[str, Job] = {job.name: job for job in [
@@ -745,6 +811,8 @@ JOBS: dict[str, Job] = {job.name: job for job in [
     # Release legs compile PGO-instrumented and -fprofile-use objects, so each triple has its own
     # group; no floor, since a release is rarely warm (the scheduled main run refreshes the caches).
     Job("release-build", job_release_build, cache_group="release-{triple}", setup=setup_release),
+    # A dispatch-only tool (run when a new host is added), so no floor; dispatches save its caches.
+    Job("closure-discover", job_closure_discover, cache_group="discover-{triple}", setup=setup_discover),
 ]}
 
 
