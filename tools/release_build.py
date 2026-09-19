@@ -89,7 +89,15 @@ def archive_stem(version: str, host: Host) -> str:
 LINUX_STATIC_RUNTIME = "-static-libstdc++ -static-libgcc"
 
 
-def configure_command(host: Host, build_dir: Path, toolchain: list[str] | None = None) -> list[str]:
+def launcher_args(launcher: str) -> list[str]:
+    """Compiler launcher (zccache in CI). Explicitly empty for "none", so a launcher recorded in a
+    reused CMakeCache.txt is cleared rather than kept."""
+    value = "" if launcher == "none" else launcher
+    return [f"-DCMAKE_C_COMPILER_LAUNCHER={value}", f"-DCMAKE_CXX_COMPILER_LAUNCHER={value}"]
+
+
+def configure_command(host: Host, build_dir: Path, toolchain: list[str] | None = None,
+                      launcher: str = "none") -> list[str]:
     """The CMake configure line. With `toolchain` (PGO), the linker flags come from LDFLAGS instead."""
     command = [
         "cmake", "-S", str(REPO_ROOT), "-B", str(build_dir), "-G", "Ninja",
@@ -97,6 +105,7 @@ def configure_command(host: Host, build_dir: Path, toolchain: list[str] | None =
         "-DLLVM_APPEND_VC_REV=OFF",
         "-DLLVM_LD_ENABLE_PPROF=OFF",
         "-DLLVM_LD_ENABLE_DHAT=OFF",
+        *launcher_args(launcher),
     ]
     if host.os == "linux" and toolchain is None:
         command.append(f"-DCMAKE_SHARED_LINKER_FLAGS={LINUX_STATIC_RUNTIME}")
@@ -232,17 +241,45 @@ def link_timed(host: Host, directory: Path, corpus: Path, threads: int, variant:
     return wall, (None if cpu_before is None else cpu_after - cpu_before)
 
 
-def build(host: Host, build_dir: Path, toolchain: list[str] | None, env: dict[str, str] | None) -> None:
+def build(host: Host, build_dir: Path, toolchain: list[str] | None, env: dict[str, str] | None,
+          launcher: str = "none") -> None:
     full_env = dict(os.environ, **env) if env else None
-    run(configure_command(host, build_dir, toolchain), env=full_env)
+    run(configure_command(host, build_dir, toolchain, launcher), env=full_env)
     run(["cmake", "--build", str(build_dir), "--target", *BUILD_TARGETS], env=full_env)
 
 
-def pgo_build(host: Host, build_dir: Path, corpus_root: Path) -> None:
+TABLEGEN_TARGETS = ["llvm-tblgen", "llvm-min-tblgen"]
+
+
+def native_tablegen(host: Host, tblgen_dir: Path, launcher: str) -> Path:
+    """An uninstrumented, native-architecture tablegen for the PGO builds (#58).
+
+    Built instrumented, every tablegen run of the instrumented build merged its profile into one
+    shared file; on the aarch64 Linux runner that stalled at `Building Options.inc` for 5.5 hours
+    (run 35443823220). Tablegen's output does not depend on how tablegen was compiled, so this
+    changes no byte of the library; it also skips building tablegen twice with PGO flags, and on
+    x86_64 macOS (built on arm64) it runs natively instead of under Rosetta. Same standalone
+    configure as ci.yml's cross stage 1: the root cache settings are not inherited, so every
+    LLVM_INCLUDE_* guard the pruned payload needs is repeated.
+    """
+    compilers = [arg for arg in pgo_toolchain(host) if arg.startswith(("-DCMAKE_C_COMPILER=", "-DCMAKE_CXX_COMPILER="))]
+    run(["cmake", "-S", str(REPO_ROOT / "llvm-project" / "llvm"), "-B", str(tblgen_dir), "-G", "Ninja",
+         "-DCMAKE_BUILD_TYPE=Release", "-DLLVM_APPEND_VC_REV=OFF", "-DLLVM_TARGETS_TO_BUILD=X86",
+         "-DLLVM_ENABLE_PROJECTS=", "-DLLVM_INCLUDE_TESTS=OFF", "-DLLVM_INCLUDE_EXAMPLES=OFF",
+         "-DLLVM_INCLUDE_BENCHMARKS=OFF", "-DLLVM_BUILD_TOOLS=OFF", "-DLLVM_ENABLE_ZLIB=OFF",
+         "-DLLVM_ENABLE_ZSTD=OFF", "-DLLVM_ENABLE_LIBXML2=OFF", "-DLLVM_ENABLE_TERMINFO=OFF",
+         *compilers, *launcher_args(launcher)])
+    run(["cmake", "--build", str(tblgen_dir), "--target", *TABLEGEN_TARGETS])
+    return (tblgen_dir / "bin").resolve()
+
+
+def pgo_build(host: Host, build_dir: Path, corpus_root: Path, launcher: str = "none") -> None:
     instr_dir = build_dir.parent / (build_dir.name + "-instr")
+    tools = native_tablegen(host, build_dir.parent / (build_dir.name + "-tblgen"), launcher)
+    toolchain = [*pgo_toolchain(host), f"-DLLVM_NATIVE_TOOL_DIR={tools}"]
     profiles = (instr_dir / "profiles").resolve()
-    build(host, instr_dir, pgo_toolchain(host), pgo_env(host, "generate", profiles))
-    # Profiles written during the build (instrumented tablegen) are not the linker's workload.
+    build(host, instr_dir, toolchain, pgo_env(host, "generate", profiles), launcher)
+    # Nothing but the linker's training runs should have written profiles; start clean anyway.
     shutil.rmtree(profiles, ignore_errors=True)
     profiles.mkdir(parents=True)
     env = library_env(host, instr_dir.resolve())
@@ -259,7 +296,7 @@ def pgo_build(host: Host, build_dir: Path, corpus_root: Path) -> None:
     print(f"training: {count} links, {len(raws)} raw profile(s)", flush=True)
     profdata = (instr_dir / "llvm-ld.profdata").resolve()
     run([*profdata_tool(host), "merge", "-o", str(profdata), *map(str, raws)])
-    build(host, build_dir, pgo_toolchain(host), pgo_env(host, "use", profdata))
+    build(host, build_dir, toolchain, pgo_env(host, "use", profdata), launcher)
 
 
 def extract_reference(archive: Path, into: Path) -> Path:
@@ -364,15 +401,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pgo", action="store_true", help="build with clang PGO + ThinLTO (#46)")
     parser.add_argument("--train-corpus", type=Path, help="gen_corpus.py output to train on and gate with")
     parser.add_argument("--reference", type=Path, help="previous release archive for this host: byte-identity gate")
+    parser.add_argument("--launcher", default="none", help="compiler launcher (zccache in CI), or none")
     args = parser.parse_args(argv)
     host = HOSTS[args.triple]
 
     if args.pgo:
         if not args.train_corpus:
             parser.error("--pgo needs --train-corpus")
-        pgo_build(host, args.build_dir, args.train_corpus.resolve())
+        pgo_build(host, args.build_dir, args.train_corpus.resolve(), args.launcher)
     else:
-        run(configure_command(host, args.build_dir))
+        run(configure_command(host, args.build_dir, launcher=args.launcher))
         run(["cmake", "--build", str(args.build_dir), "--target", *BUILD_TARGETS])
     if host.can_execute:
         # The smoke test loads the freshly built library and makes a real ABI call.

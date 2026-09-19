@@ -2,6 +2,7 @@
 
 import sys
 import tarfile
+from unittest import mock
 import tempfile
 import unittest
 import zipfile
@@ -111,6 +112,35 @@ class PgoTest(unittest.TestCase):
         self.assertIn("-DCMAKE_LINKER=lld-link", toolchain)
         self.assertIn("-DCMAKE_AR=llvm-lib", toolchain)
         self.assertEqual(release_build.pgo_env(host, "use", Path("p"))["LDFLAGS"], "")
+
+    def test_pgo_builds_use_an_uninstrumented_native_tablegen(self):
+        """#58: instrumented tablegen stalled the aarch64 leg; both PGO builds get a plain one."""
+        host = release_build.HOSTS["x86_64-apple-darwin"]
+        commands, envs = [], []
+
+        def fake_run(command, **kwargs):
+            commands.append(command)
+            envs.append(kwargs.get("env"))
+            if "merge" in command:
+                return
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(release_build, "run", side_effect=fake_run), \
+                mock.patch.object(release_build, "link", side_effect=lambda h, d, c, t, v, env: \
+                    Path(env["LLVM_PROFILE_FILE"].replace("%p-%m", "1")).touch()):
+            release_build.pgo_build(host, Path(tmp) / "build-release", Path(tmp), launcher="zccache")
+        configures = [c for c in commands if c[:2] == ["cmake", "-S"]]
+        tblgen, instr, opt = configures
+        self.assertTrue(tblgen[2].endswith("llvm-project/llvm"))
+        self.assertIsNone(envs[commands.index(tblgen)], "tablegen must not see the PGO CFLAGS")
+        self.assertFalse(any(a.startswith("-DCMAKE_OSX_ARCHITECTURES") for a in tblgen), "tablegen runs natively")
+        for build in (instr, opt):
+            self.assertTrue(any(a.startswith("-DLLVM_NATIVE_TOOL_DIR=") and a.endswith("build-release-tblgen/bin")
+                                for a in build))
+            self.assertIn("-DCMAKE_CXX_COMPILER_LAUNCHER=zccache", build)
+
+    def test_no_launcher_clears_a_cached_one(self):
+        cmd = release_build.configure_command(release_build.HOSTS["x86_64-unknown-linux-gnu"], Path("b"))
+        self.assertIn("-DCMAKE_CXX_COMPILER_LAUNCHER=", cmd)
 
     def test_profdata_tool_is_xcrun_on_macos(self):
         self.assertEqual(release_build.profdata_tool(release_build.HOSTS["x86_64-apple-darwin"]),
