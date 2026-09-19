@@ -252,7 +252,8 @@ weekly scheduled run on main keeps those caches warm (skipped when main has not 
 builds use an uninstrumented native tablegen (`LLVM_NATIVE_TOOL_DIR`): instrumented, tablegen
 stalled the aarch64 Linux leg for 5.5 h at `Building Options.inc` (run 35443823220). musl legs
 build in Alpine with the host's static zccache binary and cache directory mounted.
-closure-discovery (#59) is next.
+closure-discovery.yml (#59) runs `closure-discover` (group `discover-<triple>`) the same way. No workflow
+builds inline any more (`test_ci_jobs.py` fails on a `cmake --build` in a workflow).
 
 `tools/audit_build.py` resolves and hashes each path once (it used to redo it for all ~1M
 `ninja -t deps` lines: 151 s -> 4 s locally, identical closure output).
