@@ -103,6 +103,30 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertEqual(len(records), 1)
 
+    def test_a_failure_under_zccache_is_retried_once_with_the_cache_bypassed(self):
+        calls = []
+
+        def flaky(args):
+            calls.append(os.environ.get("ZCCACHE_DISABLE"))
+            if len(calls) == 1:
+                raise ci_jobs.subprocess.CalledProcessError(113, ["ninja"])
+        job = ci_jobs.Job("t-flaky", flaky, cache_group="g")
+        with mock.patch.dict(os.environ, {}), mock.patch.object(ci_jobs, "session_start", return_value=None):
+            os.environ.pop("ZCCACHE_DISABLE", None)
+            status, records = self.run_job(job)
+        self.assertEqual((status, calls), (0, [None, "1"]))
+        self.assertFalse(records[0]["warm"])
+        self.assertIn("bypassed", records[0]["detail"])
+
+    def test_a_real_error_still_fails_after_the_retry(self):
+        def broken(args):
+            raise ci_jobs.subprocess.CalledProcessError(1, ["ninja"])
+        job = ci_jobs.Job("t-broken", broken, cache_group="g")
+        with mock.patch.dict(os.environ, {}), mock.patch.object(ci_jobs, "session_start", return_value=None):
+            os.environ.pop("ZCCACHE_DISABLE", None)
+            status, _ = self.run_job(job)
+        self.assertEqual(status, 1)
+
     def test_measurement_only_job_is_warm(self):
         job = ci_jobs.Job("t-measure", lambda args: None)
         _, records = self.run_job(job, "--label", "cells:debug")

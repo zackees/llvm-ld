@@ -343,6 +343,25 @@ def session_end(session: str) -> dict:
         return {"status": "error", "raw": text[-400:]}
 
 
+def call_with_bypass_retry(job: Job, body: Callable[[argparse.Namespace], None], args: argparse.Namespace) -> None:
+    """Run a compiling job's body; if it fails, run it once more with zccache bypassed
+    (ZCCACHE_DISABLE=1: every compile goes straight to the compiler). Ninja resumes where it
+    stopped, so only the remaining compiles run uncached. zccache has failed compiles with no
+    compiler diagnostic (exit 113 on a slow compile; a silent failure of the instrumented
+    PassBuilder.cpp inside Alpine), and a cache fault must cost time, not a red build. A real
+    compile error fails the second attempt too. The fallback is a warning and is recorded."""
+    try:
+        body(args)
+    except (subprocess.CalledProcessError, SystemExit):
+        if job.cache_group is None or os.environ.get("ZCCACHE_DISABLE") == "1":
+            raise
+        log(f"::warning::{job.name} failed under zccache; retrying once with zccache bypassed (ZCCACHE_DISABLE=1)")
+        summary(f"- zccache: {job.name} failed under zccache and was retried with the cache bypassed")
+        os.environ["ZCCACHE_DISABLE"] = "1"
+        args.bypassed = True
+        body(args)
+
+
 def is_warm(stats: dict | None) -> bool:
     """Warm = every compile was served from the cache."""
     return bool(stats) and stats.get("status") == "ok" and stats.get("misses", 1) == 0
@@ -394,7 +413,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         env_session = {"ZCCACHE_SESSION_ID": session} if session else {}
         os.environ.update(env_session)
         try:
-            job.body(args)
+            call_with_bypass_retry(job, job.body, args)
         except subprocess.CalledProcessError as exc:
             log(f"::error::{job.name}: command failed with exit code {exc.returncode}")
             status = 1
@@ -406,9 +425,12 @@ def cmd_run(args: argparse.Namespace) -> int:
                 stats = session_end(session)
                 log(f"zccache: {stats.get('compilations')} compilations, {stats.get('hits')} hits, "
                     f"{stats.get('misses')} misses, {stats.get('non_cacheable')} non-cacheable")
-    warm = status == 0 and (args.cached == "true" or not args.compiled or is_warm(stats))
+    warm = status == 0 and not getattr(args, "bypassed", False) and (
+        args.cached == "true" or not args.compiled or is_warm(stats))
     record = {"job": args.label or job.name, "seconds": round(time.time() - start, 1), "warm": warm,
               "detail": args.detail or ("built" if args.compiled else "")}
+    if getattr(args, "bypassed", False):
+        record["detail"] += " (retried with zccache bypassed)"
     if stats and args.compiled:
         record["zccache"] = {k: stats.get(k) for k in ("compilations", "hits", "misses", "non_cacheable")}
         summary(f"zccache {record['job']}: {stats.get('hits')} hits, {stats.get('misses')} misses (warm={warm})")
