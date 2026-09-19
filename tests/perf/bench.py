@@ -123,6 +123,9 @@ def main() -> int:
             if not has_pdb:
                 return dict(exe=sha(out), pdb=None, exe_bytes=out.stat().st_size, pdb_bytes=None)
             return dict(exe=sha(out), pdb=sha(pdb), exe_bytes=out.stat().st_size, pdb_bytes=pdb.stat().st_size)
+        # Flush dirty pages left by earlier cells (their EXE/PDB outputs) so the
+        # kernel does not write them back in the middle of this cell's timed links.
+        os.sync()
         gate = {}
         for name, exe in (("candidate", cand), ("baseline", base)):
             if not exe: continue
@@ -144,13 +147,19 @@ def main() -> int:
                     raise SystemExit(f"BYTE-IDENTITY GATE FAILED: {k} differs (saved to {corpus}/mismatch-*.{k})")
             pdb_note = f", pdb {gate['candidate']['pdb_bytes']} B" if has_pdb else " (no PDB in this variant)"
             print(f"gate ok: exe {gate['candidate']['exe_bytes']} B{pdb_note} identical to baseline")
+        os.sync()
         samples = {"candidate": [], "baseline": []}
         for i in range(a.runs):
             order = [("candidate", cand), ("baseline", base)] if i % 2 == 0 else [("baseline", base), ("candidate", cand)]
             for name, exe in order:
                 if exe: samples[name].append(run(exe, a.bare, rsp, out, extra, corpus, pdb=has_pdb))
         def med(name, key): return statistics.median(s[key] for s in samples[name])
+        # Raw wall times in execution order (pair i: candidate first when i is even), kept so a
+        # bimodal cell can be diagnosed: do slow samples cluster in time, alternate, or follow
+        # one linker?
+        samples_ms = {name: [round(s["wall"] * 1000, 3) for s in samples[name]] for name in samples if samples[name]}
         result = dict(corpus=str(corpus), mode=mode, variant=a.variant, runs=a.runs, threads=a.threads, extra=extra, gate=gate,
+                      samples_ms=samples_ms,
                       candidate=dict(wall_ms=med("candidate", "wall") * 1000, cpu_ms=med("candidate", "cpu") * 1000, rss_mb=med("candidate", "rss") / 1e6))
         line = f"candidate: wall {result['candidate']['wall_ms']:.1f} ms  cpu {result['candidate']['cpu_ms']:.1f} ms  rss {result['candidate']['rss_mb']:.0f} MB"
         if base:

@@ -201,13 +201,37 @@ class BenchReportRenderTest(unittest.TestCase):
         cells = full_cells()
         for cell in cells:
             if cell["mode"] == "release" and cell["variant"] == "nopdb" and cell["corpus"].endswith("/medium"):
-                cell["speedup_percent"], cell["speedup_percent_q1"], cell["speedup_percent_q3"] = -158.0, -170.0, 65.0
+                # A tight IQR straddling zero: a real ~0% change, not noise.
+                cell["speedup_percent"], cell["speedup_percent_q1"], cell["speedup_percent_q3"] = 0.7, -1.5, 2.0
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = pathlib.Path(raw_tmp)
             self.assertEqual(render(tmp, cells).returncode, 0)
             chart = (tmp / "site" / "link-speed-overview-dark.svg").read_text(encoding="utf-8")
             self.assertIn("link within noise", chart)
-            self.assertNotIn("+158%", chart)
+            self.assertNotIn("link -1%", chart)
+            self.assertNotIn("timing noisy", chart)
+
+
+    def test_noisy_cell_draws_no_split(self) -> None:
+        """#38: a bimodal measurement (wall IQR wider than 25% of the median) must not be split."""
+        cells = full_cells()
+        for cell in cells:
+            if cell["mode"] == "debug" and cell["variant"] == "nopdb" and cell["corpus"].endswith("/large") \
+                    and cell["threads"] == 4:
+                cell["candidate"]["wall_ms_q1"], cell["candidate"]["wall_ms_q3"] = 40.0, 115.0
+                cell["samples_ms"] = {"candidate": [45.0, 115.0, 44.0, 116.0], "baseline": [100.0, 99.0, 101.0, 98.0]}
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = pathlib.Path(raw_tmp)
+            result = render(tmp, cells)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            chart = (tmp / "site" / "link-speed-overview-dark.svg").read_text(encoding="utf-8")
+            self.assertEqual(chart.count("timing noisy on this runner: split not shown"), 1)
+            # The other cells keep their split.
+            self.assertIn("PDB 300 ms → 170 ms", chart)
+            latest = json.loads((tmp / "site" / "latest.json").read_text(encoding="utf-8"))
+            noisy = [c for c in latest["cells"] if c["samples_ms"]]
+            self.assertEqual(len(noisy), 1)
+            self.assertEqual(noisy[0]["samples_ms"]["candidate"], [45.0, 115.0, 44.0, 116.0])
 
 
 class BenchReportRejectsTest(unittest.TestCase):

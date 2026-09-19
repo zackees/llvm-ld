@@ -133,7 +133,11 @@ stacked bars, stock lld-link (dark blue `#1f6feb`) and llvm-ld (whiter blue `#a5
 highest measured thread count. The solid segment is the link without `/debug`; the hatched,
 dotted-outline segment is the extra time `/debug:full` adds on the same objects. The legend comes
 first, above the grid. A PDB segment is drawn only if the PDB cell's q1 clears the no-PDB cell's
-q3 for both linkers; otherwise the cell says "PDB cost within noise". Debug and Release share an
+q3 for both linkers; otherwise the cell says "PDB cost within noise". A cell whose no-PDB or PDB
+measurement is noisy (either linker's wall IQR > 25% of its median, or the paired-speedup IQR >
+25 points; hosted runners go bimodal on some cells, #38) draws a plain bar and "timing noisy on
+this runner: split not shown". `bench.py` records raw per-link samples (`samples_ms`, execution
+order) and `sync()`s before its gate and timing loops. Debug and Release share an
 ms axis per column; the LTO row has its own. There is no history series; do not re-add one.
 The measurement matrix comes from `gen_corpus.py --print-matrix`, never from hand-written loops:
 ThinLTO is `small` only at the highest thread count with `lto_runs` (5) samples, because one
