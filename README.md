@@ -53,6 +53,24 @@ The underlying data is [`latest.json`](https://github.com/zackees/llvm-ld/blob/b
 on the `benchmark-stats` branch, and every cell is tabulated on the
 [dashboard](https://zackees.github.io/llvm-ld/).
 
+### Faster links you can opt into
+
+By default llvm-ld's output is byte-identical to stock `lld-link` at the pinned LLVM version, and
+that is gated in CI. Faster links that **change the output** are only ever enabled by you, with an
+explicit flag (#40); llvm-ld never turns one on by itself. These upstream lld flags qualify today
+(same bytes from stock `lld-link` and llvm-ld for the same flag):
+
+| flag | what it changes | measured effect (ThinLTO, small corpus, 4 threads) |
+|---|---|---|
+| `/opt:lldlto=0` | skips cross-module (LTO) optimization; each module keeps the optimization it was compiled with | **~8x faster link** (11.3 s -> 1.4 s) |
+| `/opt:lldlto=1` | lighter cross-module optimization pipeline | ~8% faster |
+| `/opt:lldltocgo=1` | lower codegen optimization level | no measurable gain |
+| `/lldltocache:<dir>` | nothing: output is identical; unchanged modules skip codegen on relink | incremental relinks only |
+
+With a ThinLTO build, nearly all link time is LLVM optimization and codegen rather than linking,
+so these flags are where large ThinLTO speedups come from; they trade runtime performance of the
+linked program for link time.
+
 ## Building
 
 The supported configuration is CMake with the Ninja generator on MSVC. The Visual Studio

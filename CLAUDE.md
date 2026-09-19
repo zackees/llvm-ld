@@ -32,9 +32,9 @@ This was investigated (Sep 2026). For a normal object-file link, the code that e
 The multi-MB files (`Target/X86/X86ISelLowering.cpp`, `CodeGen/SelectionDAG/*`,
 `Transforms/**`, `Analysis/*`, `IR/*`, `Support/UnicodeNameToCodepointGenerated.cpp`, all `.td`)
 are compiled into the DLL but are **inert during a non-LTO link**. During LTO they are LLVM's
-optimizer/backend, not the linker; a hotspot there is an upstream issue, not a local edit, and
-issue #6 gates LTO output on byte-identity with a pinned clang-cl so codegen changes would break
-the correctness gate. Binary-size/build-time wins in those directories come from CMake
+optimizer/backend, not the linker. The default LTO output is gated on byte-identity (#6), so a
+codegen speedup that changes output bytes is allowed **only as an explicit user opt-in** (see
+"Output-changing optimizations" below); it can never change the default. Binary-size/build-time wins in those directories come from CMake
 (`LLVM_TARGETS_TO_BUILD`, `/OPT:REF /Gy`), not source edits.
 
 `.ignore` at the repo root hides the inert directories from `rg`/Grep by default. Use an
@@ -237,7 +237,8 @@ but means a corpus cannot be shared between machines by hash.
 ## Correctness constraints on any optimization
 
 - `tests/gold_link.ps1` / `tests/windows_correctness.ps1` require byte-identical output against
-  reference `lld-link` and across build-N/build-M. Optimizations must be output-preserving.
+  reference `lld-link` and across build-N/build-M. With no opt-in flag, every optimization must be
+  output-preserving; output-changing ones follow the opt-in rule below.
 - `tests/tier2_corpus.ps1` (#28) is the Tier 2 matrix: a purpose-built corpus in `tests/tier2/`
   (weak externals, COMDATs/ICF, init_seg, EH, TLS, a delay-loaded DLL, ml64, 3,000-function scale
   TU) linked no-LTO/ThinLTO/full-LTO, twice per side, EXE/PDB/DLL/PDB/import lib byte-identical
@@ -254,6 +255,28 @@ but means a corpus cannot be shared between machines by hash.
   (2048-object fixture, 5 repeats, bootstrap CI) — extend it rather than writing a new harness.
   This override applies to Windows builds only, so the Linux `llvm-ld-direct` used by
   `tests/perf/bench.py` and the `link-benchmark` workflow runs on glibc malloc.
+
+## Output-changing optimizations: explicit user opt-in only (#40)
+
+Owner decision (2026-09-18), replacing the old "every optimization must preserve output bytes":
+
+1. **Default output stays byte-identical to stock lld** at the pinned version. All existing
+   byte-identity gates stay, unchanged.
+2. **Anything that changes output bytes must be enabled explicitly by whoever invokes the
+   linker**, via a documented command-line flag. Never on by default, never via an environment
+   variable (gates run with `/lldignoreenv`), never enabled by the library on the caller's behalf.
+   An agent must not turn one on in a default code path "because it is faster".
+3. **Every opt-in must be** documented (what changes in the output, what it buys, measured),
+   deterministic run-vs-run, correct (the linked program runs and passes its checks), and tested
+   so it cannot leak into the default path.
+
+Upstream lld already has opt-in knobs; stock and llvm-ld match byte for byte on them, so the
+existing gates cover them. Measured on the ThinLTO small corpus, `/threads:4`: `/opt:lldlto=1`
+about -8% wall, `/opt:lldltocgo=1` no gain, `/opt:lldlto=0` **8x faster** (11.3 -> 1.4 s: skips
+cross-module optimization; modules keep their compile-time `-O2`). `tests/tier2_corpus.ps1` has a
+`thinlto-lto0` row proving an opt-in is deterministic and runs correctly. A future llvm-ld-only
+opt-in (a payload patch with no upstream flag) needs its own issue meeting rule 3, plus a CI check
+that it is off by default.
 
 ## CI build script and build-tree cache (#21)
 
