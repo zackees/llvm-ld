@@ -16,6 +16,6 @@ def main() -> None:
         path=a.source/pathlib.PurePosixPath(relative)
         if not path.is_file(): raise SystemExit(f"missing configure resource: {relative}")
         files[relative]=hashlib.sha256(path.read_bytes()).hexdigest()
-    a.output.write_text(json.dumps({"llvm_commit":"ea7d852a70e8bdfaf601d6626a760f9771b2c4b4","derivation":"union of CMake trace, compile_commands, Ninja target inputs, and compiler deps on Windows/Linux","files":dict(sorted(files.items()))},indent=2)+"\n",encoding="utf-8")
+    a.output.write_text(json.dumps({"llvm_commit":"ea7d852a70e8bdfaf601d6626a760f9771b2c4b4","derivation":"union of CMake trace, compile_commands, Ninja target inputs, and compiler deps on Windows/Linux/macOS hosts","files":dict(sorted(files.items()))},indent=2)+"\n",encoding="utf-8")
 
 if __name__=="__main__": main()
