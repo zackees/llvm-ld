@@ -47,6 +47,11 @@ class FloorsTest(unittest.TestCase):
         self.assertEqual(violations, [], report)
         self.assertTrue(any("WARM" in line for line in report))
 
+    def test_work_time_is_floored_separately_from_wall_time(self):
+        violations, report = bench_ci.evaluate(FLOORS, timings(minutes=9), {"cells": healthy_cells()}, 20 * 60)
+        self.assertTrue(any("work" in v and "> 25 min" in v for v in violations), violations)
+        self.assertTrue(any("queue included" in line for line in report))
+
     def test_ci_time_floors_are_enforced_only_when_warm(self):
         slow = timings(minutes=60)
         warm_violations, _ = bench_ci.evaluate(FLOORS, slow, {"cells": healthy_cells()}, 130 * 60)
@@ -77,8 +82,11 @@ class FloorsTest(unittest.TestCase):
         violations, report = bench_ci.evaluate(FLOORS, timings(), {"cells": cells}, 10 * 60)
         self.assertEqual(violations, [])
         self.assertTrue(any("noisy, skipped" in line for line in report))
+        # A run that is mostly noise is not worth publishing, whatever the limit is set to.
         too_noisy = [cell(c["mode"], c["corpus"], c["variant"], c["speedup_percent"], noisy=True) for c in cells]
-        violations, _ = bench_ci.evaluate(FLOORS, timings(), {"cells": too_noisy}, 10 * 60)
+        floors = json.loads(json.dumps(FLOORS))
+        floors["link_speed"]["max_noisy_cells"] = len(too_noisy) - 1
+        violations, _ = bench_ci.evaluate(floors, timings(), {"cells": too_noisy}, 10 * 60)
         self.assertTrue(any("noisy cells" in v for v in violations))
 
     def test_only_each_modes_peak_thread_count_is_checked(self):

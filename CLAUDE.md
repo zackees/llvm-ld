@@ -200,9 +200,14 @@ first-party C/C++, pgo_build.py, gen_corpus.py, clang and BOLT versions): a main
 touches none of them skips both PGO jobs. The old single job took 126 min (run 35451964051: the
 profile was rebuilt every run, so the optimized build was always cold).
 
-Floors (`tools/bench_floors.json`, `tools/bench_ci.py floors`): CI time (whole run <= 30 min,
-per-job limits) is enforced **only on warm runs**; link speed (per-cell minimum speedups at the
-peak thread count, noisy cells skipped) and at most 2 noisy cells on every run. The `floors` job
+Floors (`tools/bench_floors.json`, `tools/bench_ci.py floors`): CI time (work = the sum of the
+jobs' own times <= 25 min, wall <= 45 min, per-job limits) is enforced **only on warm runs**
+(warm = every build job at a >= 90% zccache hit ratio, `ci_jobs.WARM_HIT_RATIO`). Work is the
+tighter number and the one this workflow controls; wall time also contains the runner queue
+between jobs (38.5 min wall for 14.4 min of work in run 35470605972). link speed (per-cell minimum speedups at the
+peak thread count, noisy cells skipped) and at most 14 of ~38 noisy cells on every run: one runner
+measured 0 noisy cells and the next 9 on the same commit, so the count only catches a run that is
+mostly noise. The `floors` job
 runs after publish/deploy with `if: always()`, so a violation fails the workflow at the end but
 never stops the charts from updating. Raise a floor only with evidence from several runs. `ci.yml`'s `build-linux` job, on push to
 `main` only (never on PRs), after its closure audit and `ctest`, copies `build/llvm-ld-direct`

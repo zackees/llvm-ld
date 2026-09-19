@@ -115,14 +115,20 @@ def evaluate(floors: dict, timings: list[dict], latest: dict | None, total_secon
         report.append(line)
         if warm and limit and t["seconds"] > limit * 60:
             violations.append(f"warm {t['job']} took {t['seconds'] / 60:.1f} min > {limit} min")
+    # Work: the sum of the jobs' own times. Unlike wall time it excludes the runner queue between
+    # jobs, which this workflow does not control, so it is the tighter and more meaningful floor.
+    work = sum(t["seconds"] for t in timings) / 60
+    report.append(f"  work (sum of job times): {work:.1f} min (floor {ci['work_max_minutes']} min)")
+    if warm and work > ci["work_max_minutes"]:
+        violations.append(f"warm run did {work:.1f} min of work > {ci['work_max_minutes']} min")
     if total_seconds is not None:
         cold = ci["cold_reference_minutes"]
         improvement = 100 * (1 - total_seconds / 60 / cold)
-        report.append(f"  whole run: {total_seconds / 60:.1f} min "
+        report.append(f"  whole run: {total_seconds / 60:.1f} min wall, queue included "
                       f"({improvement:+.0f}% vs the {cold}-min cold reference; floor "
                       f"{ci['total_max_minutes']} min = {100 * (1 - ci['total_max_minutes'] / cold):.0f}% faster)")
         if warm and total_seconds > ci["total_max_minutes"] * 60:
-            violations.append(f"warm run took {total_seconds / 60:.1f} min > {ci['total_max_minutes']} min")
+            violations.append(f"warm run took {total_seconds / 60:.1f} min wall > {ci['total_max_minutes']} min")
     if not warm:
         report.append("  (cold run: CI-time floors are reported, not enforced)")
 
