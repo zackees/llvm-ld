@@ -769,6 +769,10 @@ def setup_discover(args: argparse.Namespace) -> None:
 def discovery_tree() -> None:
     """Full upstream at the pinned commit, minus the reviewed prune, plus the declared patches
     (tools/prepare_discovery_tree.py), in place of the committed payload."""
+    if (ROOT / "committed-payload").is_dir():  # already stood up (the bypass retry reruns the job)
+        log("discovery tree already in place")
+        return
+    shutil.rmtree(ROOT / "upstream", ignore_errors=True)
     sh(["curl", "-fsSL", LLVM_SRC_URL, "-o", "llvm-src.tar.xz"])
     (ROOT / "upstream").mkdir()
     sh(["tar", "-xJf", "llvm-src.tar.xz", "-C", "upstream", "--strip-components=1"])
