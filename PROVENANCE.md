@@ -11,7 +11,7 @@ commands/depfiles and must not read source outside the pinned tree.
 The payload committed under `llvm-project/` is not a verbatim mirror of that commit; it is a
 pruned subset plus one restored file, and `provenance/llvm-source-closure.json` remains the sole
 authority over its exact contents, regenerated from the pruned tree by the same mechanical
-evidence pipeline described above rather than hand-edited: it lists 5,609 files. Removed are all
+evidence pipeline described above rather than hand-edited: it lists 5,671 files. Removed are all
 subdirectories of `llvm/tools` (the directory's own CMakeLists.txt is kept, since it is the hook
 that pulls in lld via `add_llvm_external_project`), `lld/{ELF,MachO,wasm,tools,docs}`, and these
 `llvm/lib` directories: ABI, FuzzMutate, FileCheck, InterfaceStub, CAS, DWARFLinker, MCA, ObjCopy,
@@ -101,6 +101,36 @@ every SHA check passes, so an aborted run cannot leave a half-written payload. N
 configuration performs no
 LLVM network acquisition. Windows acceptance rejects any closure drift and publishes the fresh
 inventory; Linux publishes its platform-specific inventory and both reject undeclared reads.
+
+## Host coverage and closure discovery
+
+The closure is the union of what every supported **host** build reads: Windows x64/arm64, Linux
+glibc and musl on x64/arm64, and macOS x64/arm64 (the hosts `.github/workflows/release.yml`
+publishes). The host is where llvm-ld-coff runs; every build still links only Windows PE/COFF.
+Hosts differ in a handful of files the others never read: aarch64 math headers under
+`libc/src/__support/`, Apple-only CMake modules such as `UseLibtool.cmake` and `FindLibEdit.cmake`,
+and headers that LLVM's CMake picks up by globbing a directory.
+
+A host the closure does not cover yet cannot build from the committed payload, so its files are
+found by discovery, not by hand:
+
+1. `tools/prepare_discovery_tree.py` stands up the pre-closure tree: the full upstream checkout at
+   the pinned commit, minus the reviewed directory prune, with the declared patched files taken from
+   the committed payload. Upstream CMake modules that llvm-ld shims (`cmake/find-shims/`) are left
+   out, because LLVM puts `llvm/cmake/modules` first on `CMAKE_MODULE_PATH` and an upstream
+   `FindLibXml2.cmake` would shadow the shim and configure a different build than production.
+2. `.github/workflows/closure-discovery.yml` builds over that tree on each new host and audits what
+   the build read with `tools/audit_build.py`, exactly as `ci.yml` does.
+3. `tools/normalize_closure.py` turns each audit into a manifest. Closures from case-insensitive
+   hosts (macOS) need `--canonicalize-against <upstream tree>`: their depfiles record headers under
+   the case their `#include` used (`llvm/ASMParser/` for upstream `llvm/AsmParser/`), which does not
+   exist on a case-sensitive checkout.
+4. `tools/merge_llvm_closures.py` unions the manifests with the committed closure, and
+   `tools/materialize_llvm_payload.py` reproduces the payload from it. `tools/verify.py` must pass.
+
+Every file added this way is byte-identical to upstream; nothing in `llvm-project/` is edited. The
+llvmorg-23.1.0 release tarball was checked against the pinned commit before use: all 5,609 files in
+the previous closure hashed identically in it, including the declared patches.
 
 ## Vendored libxml2 (in-process Windows manifest merging)
 

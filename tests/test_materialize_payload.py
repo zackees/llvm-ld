@@ -11,11 +11,12 @@ raises the expected drift error.
 stdlib only, no pytest. Run directly: python tests/test_materialize_payload.py
 """
 from __future__ import annotations
-import hashlib, os, pathlib, shutil, subprocess, sys, tempfile, time, zipfile
+import hashlib, json, os, pathlib, shutil, subprocess, sys, tempfile, time, zipfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MATERIALIZE = ROOT / "tools" / "materialize_llvm_payload.py"
 MANIFEST = ROOT / "provenance" / "llvm-source-closure.json"
+PRUNE = ROOT / "provenance" / "payload-prune.json"
 LLVM_PROJECT = ROOT / "llvm-project"
 CROSS_COMPILE_REL = pathlib.PurePosixPath("llvm/cmake/modules/CrossCompile.cmake")
 # Documented fallback only: used if no commit in history can be located that
@@ -67,7 +68,35 @@ def build_standin(commit: str, dest: pathlib.Path) -> pathlib.Path:
     cross_compile_dst = standin_llvm_project.joinpath(*CROSS_COMPILE_REL.parts)
     cross_compile_dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(cross_compile_src, cross_compile_dst)
+    backfill_later_additions(standin_llvm_project)
     return standin_llvm_project
+
+
+def backfill_later_additions(standin_llvm_project: pathlib.Path) -> None:
+    """Add locked files that joined the payload after the pre-strip commit.
+
+    The pre-strip commit predates host-coverage extensions (aarch64 Linux and macOS; see
+    PROVENANCE.md, "Host coverage and closure discovery"), so it lacks the upstream files those
+    added. They come from the committed payload instead, the same way CrossCompile.cmake does:
+    each is unpatched upstream, locked by hash in the closure, and was checked against the
+    upstream release tarball when it was added. A declared patched file is never backfilled —
+    it must still come from upstream history, or this test would stop proving that the prune
+    list and patches reproduce the payload.
+    """
+    locked = json.loads(MANIFEST.read_text(encoding="utf-8"))["files"]
+    patched = {entry["path"] for entry in json.loads(PRUNE.read_text(encoding="utf-8"))["patched"]}
+    added = 0
+    for relative in locked:
+        target = standin_llvm_project.joinpath(*pathlib.PurePosixPath(relative).parts)
+        if target.exists():
+            continue
+        if relative in patched:
+            raise SystemExit(f"patched file {relative} is missing from the pre-strip commit; it cannot be backfilled")
+        source = LLVM_PROJECT.joinpath(*pathlib.PurePosixPath(relative).parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        added += 1
+    print(f"backfilled {added} later-added locked file(s) from the committed payload")
 
 
 def hash_tree(root: pathlib.Path) -> dict[str, str]:
