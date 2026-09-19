@@ -188,9 +188,13 @@ link-benchmark is split into cached sub-jobs (#50): `corpus`, `plain` (the stock
 up to 45 min for ci.yml's artifact for the SHA, else builds in-job) and `pgo-instr` run in
 parallel; `pgo-opt` builds the candidate (patches + PGO + ThinLTO + BOLT); `cells` is a matrix
 (debug/release/thinlto) measuring in parallel; `measure` renders; `floors` checks the floors last.
-Shared logic is in local composite actions: `.github/actions/pgo-setup` (toolchain, exact-input
-key `tools/bench_ci.py pgo-key`, cached final binary), `zccache-build` (a build under the job's own
-zccache cache with a stats session that decides warm = 0 misses) and `record-timing`. The
+Every building or measuring job is the one template `.github/actions/ci-job` over a job declared in
+`tools/ci_jobs.py` (#55): `prepare` (toolchain + cache identities), the job's exact-input artifact
+cache, `zackees/zccache@1.14.3` for the job's cache group, `ci_jobs.py run` (the job under a zccache
+stats session; warm = 0 misses; writes `timing-<job>.json`), then artifact save, zccache cleanup,
+prune of superseded compile-cache entries, and the timing upload. The YAML only checks out, calls
+the template and moves artifacts; job logic goes in `ci_jobs.py`, never inline bash. Caches are
+saved by main and by explicit dispatches only (`saves_caches`); other refs read main's. The
 optimized binary and its profile are cached under the exact-input key (payload closure, CMake,
 first-party C/C++, pgo_build.py, gen_corpus.py, clang and BOLT versions): a main commit that
 touches none of them skips both PGO jobs. The old single job took 126 min (run 35451964051: the
@@ -224,10 +228,11 @@ ran. clang was picked over a runner-image default because it matches the compile
 already records and the clang-generated corpora.
 
 Compile caching: **zccache, not sccache** (owner decision, 2026-09-19). `link-benchmark` uses no
-sccache at all: every C++ build node runs under the shared `zccache-build` action with its own
-zccache cache. `ci.yml`'s `build-linux` caches its build tree with zccache 1.14.0
-`snapshot`/`replay` via `tools/ci_build.py` (#21); its compile cache and the other workflows'
-still use sccache, which is being migrated (#54).
+sccache at all: every C++ build runs through `ci-job`, whose cache group names the zccache entry
+(`zccache-<os>-<arch>-<group>-<sha>`, restored by prefix; jobs compiling identical commands share a
+group, e.g. `linux-clang-release`). `ci.yml`'s `build-linux` caches its build tree with zccache
+`snapshot`/`replay` via `tools/ci_build.py` (#21); its compile cache and the other workflows are
+being moved onto `ci-job` (#57 ci/correctness/benchmark, #58 release, #59 closure-discovery).
 
 ### What the numbers mean, and the trap they avoid
 

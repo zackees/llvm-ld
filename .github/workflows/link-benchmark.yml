@@ -138,76 +138,32 @@ jobs:
 
   # The jobs below replace one 2-hour serial job (#50). corpus, plain and pgo-instr start in
   # parallel; pgo-opt needs the profile; the cells matrix measures build modes in parallel;
-  # measure renders; floors checks the performance floors after publication. Shared logic lives
-  # in local composite actions: pgo-setup (toolchain + exact-input key + cached result),
-  # zccache-build (a build under the job's own zccache, reporting warm/cold) and
-  # record-timing (per-job timing for the floors).
+  # measure renders; floors checks the performance floors after publication. Every building or
+  # measuring job is the same template, .github/actions/ci-job, over a job in tools/ci_jobs.py
+  # (#55): the YAML below only checks out, calls it, and moves artifacts between jobs.
   corpus:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     needs: precheck
     if: needs.precheck.outputs.should_run == 'true'
     outputs:
-      key: ${{ steps.corpus_key.outputs.key }}
+      key: ${{ steps.job.outputs.artifact-key }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - id: t0
-        run: echo "start=$(date +%s)" >> "$GITHUB_OUTPUT"
-      # The corpora are deterministic given the generator, the compiler and the
-      # checkout path, and regenerating `large` costs 15-20 minutes on a hosted
-      # runner. Cache them. clang's version is in the key because the objects
-      # are its output; the path is not, because it is fixed in CI (CodeView
-      # objects embed absolute source paths, so a corpus is not portable
-      # between checkout locations).
-      - name: corpus cache key
-        id: corpus_key
-        run: |
-          set -euo pipefail
-          MODE="${{ inputs.mode || 'full' }}"
-          echo "MODE=$MODE" >> "$GITHUB_ENV"
-          SMOKE_FLAG=""
-          if [ "$MODE" = "smoke" ]; then
-            SMOKE_FLAG="--smoke"
-          fi
-          # The measurement matrix (build mode, corpus, threads, runs), from
-          # the single definition in gen_corpus.MODES.
-          python3 tests/perf/gen_corpus.py --print-matrix --max-threads "$(nproc)" $SMOKE_FLAG \
-            --runs "${{ inputs.runs || 9 }}" --lto-runs "${{ inputs.lto_runs || 5 }}" \
-            > "$RUNNER_TEMP/matrix.txt"
-          echo "measurement matrix:"; cat "$RUNNER_TEMP/matrix.txt"
-          GEN_HASH=$(sha256sum tests/perf/gen_corpus.py | cut -c1-16)
-          CLANG_ID=$(clang --version | head -1 | tr -cd '[:alnum:].' )
-          echo "key=corpus-$MODE-$GEN_HASH-$CLANG_ID" >> "$GITHUB_OUTPUT"
-      - id: corpus_cache
-        uses: actions/cache@v4
+      # The corpora are cached by exact input (generator + clang; the CI checkout path is fixed,
+      # and CodeView objects embed it). Regenerating `large` costs 15-20 minutes.
+      - id: job
+        uses: ./.github/actions/ci-job
         with:
-          path: build-perf/corpus
-          key: ${{ steps.corpus_key.outputs.key }}
-
-      - name: generate corpora
-        run: |
-          set -euo pipefail
-          # gen_corpus.py skips any object that is already present and current,
-          # so a restored cache makes this a no-op and a partial cache still
-          # only rebuilds what is missing.
-          awk '{print $1, $2}' "$RUNNER_TEMP/matrix.txt" | sort -u | while read -r mode profile; do
-            python3 tests/perf/gen_corpus.py --out build-perf/corpus --mode "$mode" \
-              --profile "$profile" --jobs "$(nproc)"
-          done
-          echo "corpus size: $(du -sh build-perf/corpus | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
-
-      - uses: ./.github/actions/record-timing
-        with:
-          job: corpus
-          start: ${{ steps.t0.outputs.start }}
-          warm: ${{ steps.corpus_cache.outputs.cache-hit == 'true' && 'true' || 'false' }}
-          detail: corpus cache ${{ steps.corpus_cache.outputs.cache-hit == 'true' && 'hit' || 'miss (generated)' }}
+          job: bench-corpus
+          label: corpus
+          args: ${{ inputs.mode == 'smoke' && '--smoke' || '' }}
 
   # The stock-lld baseline, built plain. Normally ci.yml's build-linux has already built it for
-  # this SHA; this job waits for that run instead of racing it (dispatching right after a merge
-  # used to fall back silently to a cold in-job build), and says which path it took.
+  # this SHA: the job waits (bounded) for that run instead of racing it, and falls back to an
+  # in-job build under the shared linux-clang-release zccache, saying which path it took.
   plain:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -215,7 +171,7 @@ jobs:
     if: needs.precheck.outputs.should_run == 'true'
     permissions:
       contents: read
-      actions: read
+      actions: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -223,168 +179,16 @@ jobs:
           # lacks BASELINE_REF would silently make this unmeasurable.
           fetch-depth: 0
           persist-credentials: false
-      - id: t0
-        run: echo "start=$(date +%s)" >> "$GITHUB_OUTPUT"
-      - name: wait for ci.yml on this commit (up to 45 min)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          for i in $(seq 1 90); do
-            STATUS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" \
-              --event push --limit 1 --json status --jq '.[0].status // "none"' || echo none)
-            if [ "$STATUS" != "in_progress" ] && [ "$STATUS" != "queued" ] && [ "$STATUS" != "pending" ]; then
-              echo "ci.yml for $GITHUB_SHA: $STATUS"; exit 0
-            fi
-            echo "ci.yml for $GITHUB_SHA is $STATUS; waiting ($i/90)"; sleep 30
-          done
-          echo "::warning::ci.yml for $GITHUB_SHA did not finish in 45 minutes; building in-job"
-      # ci.yml's build-linux job builds llvm-ld-direct plus this workflow's
-      # baseline on every push to main and uploads both as
-      # `llvm-ld-bench-bins-<sha>` (90-day retention), so the common path
-      # compiles nothing here (#20). If no such artifact exists for
-      # github.sha (e.g. ci.yml has not reached it yet, or a dispatch on a
-      # non-main ref) or anything recorded in it disagrees with this
-      # workflow, fall back to building in-job.
-      - name: fetch prebuilt linkers from ci.yml
-        id: prebuilt
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          FOUND=false
-          SRC_RUN=""
-          NAME="llvm-ld-bench-bins-${GITHUB_SHA}"
-          DL="$RUNNER_TEMP/prebuilt"
-          RUN_IDS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml \
-            --commit "$GITHUB_SHA" --event push --limit 20 \
-            --json databaseId --jq '.[].databaseId' || true)
-          for id in $RUN_IDS; do
-            rm -rf "$DL"
-            if ! gh run download "$id" --repo "$GITHUB_REPOSITORY" --name "$NAME" --dir "$DL"; then
-              continue
-            fi
-            if [ ! -f "$DL/candidate" ] || [ ! -f "$DL/baseline" ]; then
-              echo "::warning::run $id's $NAME artifact is missing candidate or baseline"
-              continue
-            fi
-            # This derivation must stay identical to the one in the baseline
-            # build step below: same file, same filter, same ordering.
-            EXPECT_FILES=$(python3 -c "
-          import json
-          d = json.load(open('provenance/payload-prune.json'))
-          print(' '.join('llvm-project/' + e['path'] for e in d['patched'] if 'link-speed' in e['reason']))
-          ")
-            if BENCH_BINS_PATH="$DL/bench-bins.json" \
-               EXPECT_SOURCE_SHA="$GITHUB_SHA" \
-               EXPECT_BASELINE_REF="$BASELINE_REF" \
-               EXPECT_FILES="$EXPECT_FILES" \
-               EXPECT_COMPILER="$(clang --version | head -1)" \
-               python3 -c "
-          import json, os, sys
-
-          path = os.environ['BENCH_BINS_PATH']
-          try:
-              with open(path) as f:
-                  data = json.load(f)
-          except (OSError, ValueError) as exc:
-              print('::warning::could not read %s: %s' % (path, exc))
-              sys.exit(1)
-
-          expect_files = os.environ['EXPECT_FILES'].split()
-
-          checks = [
-              ('source_sha', data.get('source_sha'), os.environ['EXPECT_SOURCE_SHA']),
-              ('baseline_ref', data.get('baseline_ref'), os.environ['EXPECT_BASELINE_REF']),
-              ('files', data.get('files'), expect_files),
-              ('compiler', data.get('compiler'), os.environ['EXPECT_COMPILER']),
-          ]
-          ok = True
-          for name, got, want in checks:
-              if got != want:
-                  print('::warning::bench-bins.json %s mismatch: got %r, want %r' % (name, got, want))
-                  ok = False
-          sys.exit(0 if ok else 1)
-          "; then
-              # Artifacts do not preserve the executable bit, so it has to be
-              # restored here.
-              mkdir -p "$RUNNER_TEMP/bin"
-              cp "$DL/candidate" "$RUNNER_TEMP/bin/candidate"
-              cp "$DL/baseline" "$RUNNER_TEMP/bin/baseline"
-              chmod +x "$RUNNER_TEMP/bin/candidate" "$RUNNER_TEMP/bin/baseline"
-              FOUND=true
-              SRC_RUN=$id
-              break
-            fi
-          done
-          echo "found=$FOUND" >> "$GITHUB_OUTPUT"
-          if [ "$FOUND" = "true" ]; then
-            echo "linkers: prebuilt by ci.yml run $SRC_RUN (${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/$SRC_RUN)" \
-              >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "linkers: no usable ci.yml artifact for $GITHUB_SHA; built in-job" \
-              >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      # Fallback when ci.yml's artifact is unavailable (e.g. a dispatch on a branch): build the
-      # plain candidate tree under this job's own zccache, then rebuild only the link-speed payload
-      # files at BASELINE_REF for the stock baseline.
-      - id: fallback
-        if: steps.prebuilt.outputs.found != 'true'
-        uses: ./.github/actions/zccache-build
+      - uses: ./.github/actions/ci-job
         with:
-          job: plain
-          key: ${{ hashFiles('provenance/llvm-source-closure.json', 'provenance/payload-prune.json', 'CMakeLists.txt', 'cmake/**', 'src/**', 'include/**', 'tools/direct_runner.cpp') }}
-          run: |
-            set -euo pipefail
-            cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-              -DLLVM_APPEND_VC_REV=OFF \
-              -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
-              -DCMAKE_C_COMPILER_LAUNCHER=zccache -DCMAKE_CXX_COMPILER_LAUNCHER=zccache
-            cmake --build build --target llvm-ld-direct
-            mkdir -p "$RUNNER_TEMP/bin"
-            set -euo pipefail
-            CANDIDATE_FILES=$(python3 -c "
-            import json
-            d = json.load(open('provenance/payload-prune.json'))
-            print(' '.join('llvm-project/' + e['path'] for e in d['patched'] if 'link-speed' in e['reason']))
-            ")
-            if [ -z "$CANDIDATE_FILES" ]; then
-              echo "::error::provenance/payload-prune.json lists no link-speed payload files; the baseline cannot be reconstructed"
-              exit 1
-            fi
-            FILES=""
-            for f in $CANDIDATE_FILES; do
-              if git cat-file -e "$BASELINE_REF:$f" 2>/dev/null; then
-                FILES="$FILES $f"
-              else
-                echo "::warning::$f does not exist at $BASELINE_REF; building the baseline with the current version of that file"
-              fi
-            done
-            FILES="${FILES# }"
-            if [ -z "$FILES" ]; then
-              echo "::error::none of the link-speed payload files listed in provenance/payload-prune.json exist at $BASELINE_REF; the baseline cannot be reconstructed"
-              exit 1
-            fi
-            echo "baseline files: $FILES"
-            git checkout "$BASELINE_REF" -- $FILES
-            cmake --build build --target llvm-ld-direct
-            cp build/llvm-ld-direct "$RUNNER_TEMP/bin/baseline"
-            git checkout HEAD -- $FILES
-
+          job: bench-plain
+          label: plain
       - uses: actions/upload-artifact@v4
         with:
           name: plain-bins-${{ github.run_id }}
           path: ${{ runner.temp }}/bin/baseline
           if-no-files-found: error
           retention-days: 7
-      - uses: ./.github/actions/record-timing
-        with:
-          job: plain
-          start: ${{ steps.t0.outputs.start }}
-          warm: ${{ (steps.prebuilt.outputs.found == 'true' || steps.fallback.outputs.warm == 'true') && 'true' || 'false' }}
-          detail: baseline ${{ steps.prebuilt.outputs.found == 'true' && 'prebuilt by ci.yml' || 'built in-job under zccache' }}
-          zccache-stats: ${{ steps.fallback.outputs.stats }}
 
   # PGO, stage 1: instrumented build + training -> profile. Skipped entirely when the optimized
   # binary for this exact-input key is already cached.
@@ -393,42 +197,25 @@ jobs:
     timeout-minutes: 180
     needs: precheck
     if: needs.precheck.outputs.should_run == 'true'
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - id: t0
-        run: echo "start=$(date +%s)" >> "$GITHUB_OUTPUT"
-      - id: setup
-        uses: ./.github/actions/pgo-setup
-      - id: build
-        if: steps.setup.outputs.final-hit != 'true'
-        uses: ./.github/actions/zccache-build
+      - id: job
+        uses: ./.github/actions/ci-job
         with:
-          job: pgo-instr
-          key: ${{ steps.setup.outputs.key }}
-          run: |
-            python3 tools/pgo_build.py instrument --launcher zccache --instr-dir "$RUNNER_TEMP/pgo-instr"
-            python3 tools/pgo_build.py train --instr-dir "$RUNNER_TEMP/pgo-instr"
-            python3 tools/pgo_build.py merge --instr-dir "$RUNNER_TEMP/pgo-instr"
-            mkdir -p "$RUNNER_TEMP/pgo-profile"
-            cp "$RUNNER_TEMP/pgo-instr/llvm-ld.profdata" "$RUNNER_TEMP/pgo-profile/"
-            tar -C "$RUNNER_TEMP/pgo-instr" --exclude='*.cpp' -czf "$RUNNER_TEMP/pgo-profile/train-corpus.tar.gz" train-corpus
-      - if: steps.setup.outputs.final-hit != 'true'
+          job: bench-pgo-instr
+          label: pgo-instr
+      - if: steps.job.outputs.artifact-hit != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: pgo-profile-${{ github.run_id }}
           path: ${{ runner.temp }}/pgo-profile/
           if-no-files-found: error
           retention-days: 7
-      - if: always()
-        uses: ./.github/actions/record-timing
-        with:
-          job: pgo-instr
-          start: ${{ steps.t0.outputs.start }}
-          warm: ${{ (steps.setup.outputs.final-hit == 'true' || steps.build.outputs.warm == 'true') && 'true' || 'false' }}
-          detail: ${{ steps.setup.outputs.final-hit == 'true' && 'exact-input cache hit, skipped' || 'built and trained' }}
-          zccache-stats: ${{ steps.build.outputs.stats }}
 
   # PGO, stage 2: -fprofile-use + ThinLTO build, then BOLT -> the published candidate. Cached
   # under the exact-input key, so a main commit that changes no C/C++ input rebuilds nothing.
@@ -436,55 +223,29 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     needs: pgo-instr
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - id: t0
-        run: echo "start=$(date +%s)" >> "$GITHUB_OUTPUT"
-      - id: setup
-        uses: ./.github/actions/pgo-setup
-      - if: steps.setup.outputs.final-hit != 'true'
-        uses: actions/download-artifact@v4
+      # Absent when pgo-instr hit the exact-input cache; this job then hits it too.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: pgo-profile-${{ github.run_id }}
           path: ${{ runner.temp }}/pgo-instr
-      - id: build
-        if: steps.setup.outputs.final-hit != 'true'
-        uses: ./.github/actions/zccache-build
+      - uses: ./.github/actions/ci-job
         with:
-          job: pgo-opt
-          key: ${{ steps.setup.outputs.key }}
-          run: |
-            tar -C "$RUNNER_TEMP/pgo-instr" -xzf "$RUNNER_TEMP/pgo-instr/train-corpus.tar.gz"
-            python3 tools/pgo_build.py optimize --bolt --launcher zccache \
-              --instr-dir "$RUNNER_TEMP/pgo-instr" --out-dir "$RUNNER_TEMP/pgo-out"
-            python3 tools/pgo_build.py bolt --bolt-dir /usr/lib/llvm-18/bin \
-              --instr-dir "$RUNNER_TEMP/pgo-instr" --out-dir "$RUNNER_TEMP/pgo-out"
-            mkdir -p "$RUNNER_TEMP/pgo-final"
-            cp "$RUNNER_TEMP/pgo-out/llvm-ld-direct" "$RUNNER_TEMP/pgo-instr/llvm-ld.profdata" "$RUNNER_TEMP/pgo-final/"
-      - if: steps.setup.outputs.final-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ runner.temp }}/pgo-final
-          key: ${{ steps.setup.outputs.key }}
+          job: bench-pgo-opt
+          label: pgo-opt
       - uses: actions/upload-artifact@v4
         with:
           name: pgo-bins-${{ github.run_id }}
           path: ${{ runner.temp }}/pgo-final/llvm-ld-direct
           if-no-files-found: error
           retention-days: 7
-      - name: summary
-        run: |
-          echo "candidate: llvm-ld-direct built with patches + PGO + ThinLTO + BOLT (key ${{ steps.setup.outputs.key }}, ${{ steps.setup.outputs.final-hit == 'true' && 'cached' || 'built' }})" >> "$GITHUB_STEP_SUMMARY"
-      - if: always()
-        uses: ./.github/actions/record-timing
-        with:
-          job: pgo-opt
-          start: ${{ steps.t0.outputs.start }}
-          warm: ${{ (steps.setup.outputs.final-hit == 'true' || steps.build.outputs.warm == 'true') && 'true' || 'false' }}
-          detail: ${{ steps.setup.outputs.final-hit == 'true' && 'exact-input cache hit, skipped' || 'built with PGO + BOLT' }}
-          zccache-stats: ${{ steps.build.outputs.stats }}
 
   # One measurement job per build mode, in parallel. Each cell is still a paired A/B on one
   # runner (candidate and baseline interleaved), so splitting across runners does not mix
@@ -501,8 +262,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - id: t0
-        run: echo "start=$(date +%s)" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v4
         with:
           name: plain-bins-${{ github.run_id }}
@@ -511,68 +270,25 @@ jobs:
         with:
           name: pgo-bins-${{ github.run_id }}
           path: ${{ runner.temp }}/pgo
-      - name: binaries
-        run: |
-          set -euo pipefail
-          mv "$RUNNER_TEMP/pgo/llvm-ld-direct" "$RUNNER_TEMP/bin/candidate"
-          chmod +x "$RUNNER_TEMP/bin/candidate" "$RUNNER_TEMP/bin/baseline"
-          # The guard in bench.py would catch this too, but failing here points at the cause.
-          if cmp -s "$RUNNER_TEMP/bin/candidate" "$RUNNER_TEMP/bin/baseline"; then
-            echo "::error::baseline and candidate are the same binary"; exit 1
-          fi
+      - run: mv "$RUNNER_TEMP/pgo/llvm-ld-direct" "$RUNNER_TEMP/bin/candidate"
       - uses: actions/cache/restore@v4
         with:
           path: build-perf/corpus
           key: ${{ needs.corpus.outputs.key }}
           fail-on-cache-miss: true
-      - name: measure ${{ matrix.mode }}
-        run: |
-          set -euo pipefail
-          SMOKE_FLAG=""
-          if [ "${{ inputs.mode || 'full' }}" = "smoke" ]; then SMOKE_FLAG="--smoke"; fi
-          mkdir -p "$RUNNER_TEMP/cells"
-          python3 tests/perf/gen_corpus.py --print-matrix --max-threads "$(nproc)" $SMOKE_FLAG \
-            --runs "${{ inputs.runs || 9 }}" --lto-runs "${{ inputs.lto_runs || 5 }}" \
-            | awk -v m="${{ matrix.mode }}" '$1 == m' > "$RUNNER_TEMP/matrix.txt"
-          {
-            echo "| cell | wall-clock cost |"
-            echo "|---|---|"
-          } >> "$GITHUB_STEP_SUMMARY"
-          while read -r mode profile threads runs variant; do
-            START=$(date +%s)
-            python3 tests/perf/bench.py \
-              --candidate "$RUNNER_TEMP/bin/candidate" \
-              --baseline "$RUNNER_TEMP/bin/baseline" \
-              --corpus "build-perf/corpus/$mode/$profile" --variant "$variant" \
-              --runs "$runs" --threads "$threads" \
-              --json "$RUNNER_TEMP/cells/$mode-$profile-t$threads-$variant.json" < /dev/null
-            echo "| $mode/$profile/t$threads/$variant | $(( $(date +%s) - START )) s |" >> "$GITHUB_STEP_SUMMARY"
-          done < "$RUNNER_TEMP/matrix.txt"
-          # Runner metadata of the machine that measured these cells, for the render job.
-          python3 - <<'EOF'
-          import json, os, platform, subprocess
-          def sh(c): return subprocess.run(c, shell=True, capture_output=True, text=True).stdout.strip()
-          meta = {
-              "image": sh("grep '^PRETTY_NAME=' /etc/os-release | cut -d= -f2- | tr -d '\"'"),
-              "cpu": sh("lscpu | grep 'Model name:' | cut -d: -f2- | xargs"),
-              "cores": sh("nproc"), "kernel": sh("uname -r"), "arch": sh("uname -m"),
-              "compiler": sh("clang --version | head -1"),
-          }
-          open(os.path.join(os.environ["RUNNER_TEMP"], "cells", "meta-${{ matrix.mode }}.json"), "w").write(json.dumps(meta))
-          EOF
+      - uses: ./.github/actions/ci-job
+        with:
+          job: bench-cells
+          label: cells:${{ matrix.mode }}
+          args: >-
+            --mode ${{ matrix.mode }} ${{ inputs.mode == 'smoke' && '--smoke' || '' }}
+            --runs ${{ inputs.runs || 9 }} --lto-runs ${{ inputs.lto_runs || 5 }}
       - uses: actions/upload-artifact@v4
         with:
           name: cells-${{ github.run_id }}-${{ matrix.mode }}
           path: ${{ runner.temp }}/cells/
           if-no-files-found: error
           retention-days: 7
-      - if: always()
-        uses: ./.github/actions/record-timing
-        with:
-          job: cells:${{ matrix.mode }}
-          start: ${{ steps.t0.outputs.start }}
-          warm: "true"
-          detail: measurement only
 
   measure:
     runs-on: ubuntu-24.04
@@ -826,9 +542,4 @@ jobs:
       - name: check the floors
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          CREATED=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .run_started_at)
-          TOTAL=$(( $(date +%s) - $(date -d "$CREATED" +%s) ))
-          python3 tools/bench_ci.py floors --timings "$RUNNER_TEMP/timings" \
-            --latest "$RUNNER_TEMP/site/latest.json" --total-seconds "$TOTAL"
+        run: python3 tools/bench_ci.py floors --timings "$RUNNER_TEMP/timings" --latest "$RUNNER_TEMP/site/latest.json" --since-run-start

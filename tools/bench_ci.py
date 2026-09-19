@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""link-benchmark CI helpers (#50): exact-input key, zccache sessions, job timings, floors.
+"""link-benchmark CI helpers (#50): the PGO exact-input key and the performance floors.
 
 Subcommands
   pgo-key        print the exact-input key of the optimized (PGO + ThinLTO + BOLT) llvm-ld-direct:
                  a hash of every input that can change that binary, plus tool identities. When
                  main moves without touching them (docs, charts, workflows) the key is unchanged
                  and the whole build is skipped by restoring the cached result.
-  zc-start       start a zccache stats session; prints the session id
-  zc-end         end it and write {"hits", "misses", "compilations", ...} to --out
-  timing         write one job's timing record (name, seconds, warm, detail) to --out
-  floors         check tools/bench_floors.json against the job timings and the published
+  floors         check tools/bench_floors.json against the job timings (written by
+                 tools/ci_jobs.py run) and the published
                  latest.json; print a report (and to $GITHUB_STEP_SUMMARY) and exit 1 on any
                  violation. CI-time floors apply only when every build job was warm.
 
@@ -18,6 +16,7 @@ Stdlib only.
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -76,47 +75,6 @@ def cmd_pgo_key(args: argparse.Namespace) -> int:
     if args.github_output and os.environ.get("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
             out.write(f"key={key}\n")
-    return 0
-
-
-def zccache(args: argparse.Namespace) -> list[str]:
-    return (args.zccache or os.environ.get("ZCCACHE") or "zccache").split()
-
-
-def cmd_zc_start(args: argparse.Namespace) -> int:
-    extra = ["--journal", str(args.journal)] if args.journal else []
-    out = subprocess.run([*zccache(args), "session-start", "--stats", *extra], capture_output=True,
-                         text=True, check=True).stdout
-    print(json.loads(out.strip().splitlines()[-1])["session_id"])
-    return 0
-
-
-def cmd_zc_end(args: argparse.Namespace) -> int:
-    out = subprocess.run([*zccache(args), "session-end", "--json", args.session], capture_output=True,
-                         text=True).stdout
-    try:
-        stats = json.loads(out)
-    except ValueError:
-        stats = {"status": "error", "raw": out[-400:]}
-    args.out.write_text(json.dumps(stats, indent=1) + "\n")
-    print(f"zccache: {stats.get('compilations')} compilations, {stats.get('hits')} hits, "
-          f"{stats.get('misses')} misses, {stats.get('non_cacheable')} non-cacheable")
-    return 0
-
-
-def cmd_timing(args: argparse.Namespace) -> int:
-    record = {
-        "job": args.job,
-        "seconds": round(time.time() - args.start, 1),
-        "warm": args.warm == "true",
-        "detail": args.detail or "",
-    }
-    if args.zccache_stats and args.zccache_stats.exists():
-        stats = json.loads(args.zccache_stats.read_text())
-        record["zccache"] = {k: stats.get(k) for k in ("compilations", "hits", "misses", "non_cacheable")}
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(record, indent=1) + "\n")
-    print(json.dumps(record))
     return 0
 
 
@@ -203,7 +161,13 @@ def cmd_floors(args: argparse.Namespace) -> int:
     floors = json.loads(args.floors.read_text())
     timings = load_timings(args.timings) if args.timings and args.timings.exists() else []
     latest = json.loads(args.latest.read_text()) if args.latest and args.latest.exists() else None
-    violations, report = evaluate(floors, timings, latest, args.total_seconds)
+    total = args.total_seconds
+    if args.since_run_start:
+        started = subprocess.run(["gh", "api", f"repos/{os.environ['GITHUB_REPOSITORY']}/actions/runs/"
+                                  f"{os.environ['GITHUB_RUN_ID']}", "--jq", ".run_started_at"],
+                                 capture_output=True, text=True, check=True).stdout.strip()
+        total = time.time() - datetime.datetime.fromisoformat(started.replace("Z", "+00:00")).timestamp()
+    violations, report = evaluate(floors, timings, latest, total)
     text = "\n".join(["### Benchmark floors (#50)", "```", *report, "```"] +
                      ([f"**{len(violations)} floor violation(s):**", *[f"- {v}" for v in violations]]
                       if violations else ["All floors met."]))
@@ -221,28 +185,13 @@ def main(argv: list[str] | None = None) -> int:
     key.add_argument("--identity", action="append", help="a shell command whose first output line identifies a tool")
     key.add_argument("--github-output", action="store_true")
     key.set_defaults(func=cmd_pgo_key)
-    start = sub.add_parser("zc-start")
-    start.add_argument("--journal", type=Path)
-    start.add_argument("--zccache")
-    start.set_defaults(func=cmd_zc_start)
-    end = sub.add_parser("zc-end")
-    end.add_argument("--session", required=True)
-    end.add_argument("--out", type=Path, required=True)
-    end.add_argument("--zccache")
-    end.set_defaults(func=cmd_zc_end)
-    timing = sub.add_parser("timing")
-    timing.add_argument("--job", required=True)
-    timing.add_argument("--start", type=float, required=True, help="epoch seconds the job's work started")
-    timing.add_argument("--warm", choices=["true", "false"], required=True)
-    timing.add_argument("--detail")
-    timing.add_argument("--zccache-stats", type=Path)
-    timing.add_argument("--out", type=Path, required=True)
-    timing.set_defaults(func=cmd_timing)
     check = sub.add_parser("floors")
     check.add_argument("--floors", type=Path, default=ROOT / "tools" / "bench_floors.json")
     check.add_argument("--timings", type=Path)
     check.add_argument("--latest", type=Path)
     check.add_argument("--total-seconds", type=float)
+    check.add_argument("--since-run-start", action="store_true",
+                       help="total = now - this workflow run's run_started_at (gh api)")
     check.set_defaults(func=cmd_floors)
     args = parser.parse_args(argv)
     return args.func(args)

@@ -1,0 +1,79 @@
+name: ci-job
+description: >-
+  The one template every building or measuring CI job runs through (#55). All logic is in
+  tools/ci_jobs.py; this only wires it to the caches: prepare (toolchain + cache identities),
+  the job's exact-input artifact cache, the zackees/zccache compile cache for the job's cache
+  group, `ci_jobs.py run`, then save / zccache cleanup / prune / timing upload, even on failure.
+inputs:
+  job:
+    description: a job name from tools/ci_jobs.py JOBS
+    required: true
+  label:
+    description: timing name when one job runs several times (e.g. cells:debug)
+    required: false
+    default: ""
+  args:
+    description: extra arguments for `ci_jobs.py prepare` and `run` (e.g. --mode debug --smoke)
+    required: false
+    default: ""
+outputs:
+  warm:
+    description: "true when the job was warm (artifact cache hit, no compile, or 0 zccache misses)"
+    value: ${{ steps.run.outputs.warm }}
+  artifact-key:
+    description: the job's exact-input artifact key ("" if it declares none)
+    value: ${{ steps.prep.outputs.artifact-key }}
+  artifact-hit:
+    description: "true when the exact-input artifact cache hit and the job was skipped"
+    value: ${{ steps.artifact.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - id: prep
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        LABEL: ${{ inputs.label }}
+      run: python3 tools/ci_jobs.py prepare "${{ inputs.job }}" ${LABEL:+--label "$LABEL"} ${{ inputs.args }}
+    - id: artifact
+      if: steps.prep.outputs.artifact-key != ''
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ steps.prep.outputs.artifact-path }}
+        key: ${{ steps.prep.outputs.artifact-key }}
+    - if: steps.prep.outputs.cache-group != '' && steps.artifact.outputs.cache-hit != 'true'
+      uses: zackees/zccache@1.14.3
+      with:
+        zccache-version: ${{ steps.prep.outputs.zccache-version }}
+        shared-key: ${{ steps.prep.outputs.cache-group }}
+        cache-cargo-registry: "false"
+        save-cache: ${{ steps.prep.outputs.save }}
+    - id: run
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        LABEL: ${{ inputs.label }}
+      run: >-
+        python3 tools/ci_jobs.py run "${{ inputs.job }}" ${LABEL:+--label "$LABEL"} ${{ inputs.args }}
+        --start "${{ steps.prep.outputs.start }}"
+        --cached "${{ steps.artifact.outputs.cache-hit == 'true' && 'true' || 'false' }}"
+    - if: success() && steps.prep.outputs.artifact-save == 'true' && steps.artifact.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ steps.prep.outputs.artifact-path }}
+        key: ${{ steps.prep.outputs.artifact-key }}
+    - if: always() && steps.prep.outputs.cache-group != '' && steps.artifact.outputs.cache-hit != 'true'
+      uses: zackees/zccache/action/cleanup@1.14.3
+    - if: always() && steps.prep.outputs.cache-group != '' && steps.prep.outputs.save == 'true' && steps.artifact.outputs.cache-hit != 'true'
+      shell: bash
+      continue-on-error: true
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: python3 tools/ci_jobs.py prune --group "${{ steps.prep.outputs.cache-group }}"
+    - if: always() && steps.prep.outputs.timing-name != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.prep.outputs.timing-name }}-${{ github.run_id }}
+        path: ${{ runner.temp }}/timing/${{ steps.prep.outputs.timing-name }}.json
+        if-no-files-found: warn
+        retention-days: 30
