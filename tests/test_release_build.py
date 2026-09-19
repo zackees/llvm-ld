@@ -99,6 +99,11 @@ class PgoTest(unittest.TestCase):
         self.assertEqual(env["CFLAGS"], "-fprofile-generate=/p/profiles")
         self.assertEqual(env["LDFLAGS"], "-fprofile-generate=/p/profiles")
 
+    def test_linux_links_the_instrumented_build_with_lld_too(self):
+        env = release_build.pgo_env(release_build.HOSTS["aarch64-unknown-linux-gnu"], "generate", Path("/p"))
+        self.assertIn("-fuse-ld=lld", env["LDFLAGS"])
+        self.assertIn("-fprofile-generate=/p", env["LDFLAGS"])
+
     def test_windows_uses_clang_cl_and_lld_link(self):
         host = release_build.HOSTS["x86_64-pc-windows-msvc"]
         toolchain = release_build.pgo_toolchain(host)
