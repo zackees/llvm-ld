@@ -16,7 +16,7 @@
 # side (the PDB embeds the command line and the EXE embeds the PDB name), copied aside afterwards.
 param(
   [string]$BuildDir = 'build',
-  [string[]]$Modes = @('nolto', 'thinlto', 'fulllto'),
+  [string[]]$Modes = @('nolto', 'thinlto', 'fulllto', 'thinlto-lto0'),
   [string]$ExternalLld = '',
   [string]$WorkDir = 'tier2-work',
   [int]$ScaleFunctions = 3000
@@ -112,9 +112,13 @@ foreach ($mode in $Modes) {
   try {
     Write-Host "=== tier2 [$mode] compile"
     switch ($mode) {
-      'nolto' { $cc = 'cl'; $lto = @() }
-      'thinlto' { $cc = 'clang-cl'; $lto = @('/clang:-flto=thin') }
-      'fulllto' { $cc = 'clang-cl'; $lto = @('/clang:-flto') }
+      'nolto' { $cc = 'cl'; $lto = @(); $optIn = @() }
+      'thinlto' { $cc = 'clang-cl'; $lto = @('/clang:-flto=thin'); $optIn = @() }
+      'fulllto' { $cc = 'clang-cl'; $lto = @('/clang:-flto'); $optIn = @() }
+      # A user opt-in that changes output bytes (#40): /opt:lldlto=0 skips the cross-module
+      # optimization pipeline. It must still be deterministic, identical stock-vs-wrapper for the
+      # same flag, and produce a program that passes its runtime checks.
+      'thinlto-lto0' { $cc = 'clang-cl'; $lto = @('/clang:-flto=thin'); $optIn = @('/opt:lldlto=0') }
       default { throw "unknown mode: $mode" }
     }
     $cflags = @('/nologo', '/c', '/Brepro', '/Z7', '/MT', '/O2', '/Gy', "/I$corpus") + $lto
@@ -131,7 +135,7 @@ foreach ($mode in $Modes) {
     Invoke-Checked "$mode compile lib" { & $cc @cxxflags (Join-Path $corpus 'dll/lib.cpp') '/Fo:lib.obj' }
     Invoke-Checked "$mode assemble asm" { ml64 /nologo /c /Foasm.obj (Join-Path $corpus 'asm.asm') }
 
-    $common = @('/threads:4', '/opt:lldltojobs=2', '/brepro', '/manifest:no', '/lldignoreenv',
+    $common = $optIn + @('/threads:4', '/opt:lldltojobs=2', '/brepro', '/manifest:no', '/lldignoreenv',
       '/opt:ref', '/opt:icf', '/debug:full', '/pdbaltpath:%_PDB%', '/machine:x64') + $libPaths
     $dllArgs = $common + @('/dll', '/out:tier2lib.dll', '/implib:tier2lib.lib', '/pdb:tier2lib.pdb', 'lib.obj')
     $exeArgs = $common + @('/subsystem:console', '/out:tier2.exe', '/pdb:tier2.pdb',
