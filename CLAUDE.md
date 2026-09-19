@@ -184,9 +184,32 @@ unchanged commit would only add runner noise to the published numbers.
 
 ### Where the binaries come from
 
-link-benchmark takes the **baseline** from ci.yml (below) and always builds the **candidate** itself
-with `tools/pgo_build.py all --bolt` (patches + PGO + ThinLTO + BOLT, sccache-backed; the measure
-job timeout is 360 min for that). The plain candidate in the ci.yml artifact is no longer measured. `ci.yml`'s `build-linux` job, on push to
+link-benchmark is split into cached sub-jobs (#50): `corpus`, `plain` (the stock baseline: waits
+up to 45 min for ci.yml's artifact for the SHA, else builds in-job) and `pgo-instr` run in
+parallel; `pgo-opt` builds the candidate (patches + PGO + ThinLTO + BOLT); `cells` is a matrix
+(debug/release/thinlto) measuring in parallel; `measure` renders; `floors` checks the floors last.
+Every building or measuring job is the one template `.github/actions/ci-job` over a job declared in
+`tools/ci_jobs.py` (#55): `prepare` (toolchain + cache identities), the job's exact-input artifact
+cache, `zackees/zccache@1.14.3` for the job's cache group, `ci_jobs.py run` (the job under a zccache
+stats session; warm = 0 misses; writes `timing-<job>.json`), then artifact save, zccache cleanup,
+prune of superseded compile-cache entries, and the timing upload. The YAML only checks out, calls
+the template and moves artifacts; job logic goes in `ci_jobs.py`, never inline bash. Caches are
+saved by main and by explicit dispatches only (`saves_caches`); other refs read main's. The
+optimized binary and its profile are cached under the exact-input key (payload closure, CMake,
+first-party C/C++, pgo_build.py, gen_corpus.py, clang and BOLT versions): a main commit that
+touches none of them skips both PGO jobs. The old single job took 126 min (run 35451964051: the
+profile was rebuilt every run, so the optimized build was always cold).
+
+Floors (`tools/bench_floors.json`, `tools/bench_ci.py floors`): CI time (work = the sum of the
+jobs' own times <= 25 min, wall <= 45 min, per-job limits) is enforced **only on warm runs**
+(warm = every build job at a >= 90% zccache hit ratio, `ci_jobs.WARM_HIT_RATIO`). Work is the
+tighter number and the one this workflow controls; wall time also contains the runner queue
+between jobs (38.5 min wall for 14.4 min of work in run 35470605972). link speed (per-cell minimum speedups at the
+peak thread count, noisy cells skipped) and at most 14 of ~38 noisy cells on every run: one runner
+measured 0 noisy cells and the next 9 on the same commit, so the count only catches a run that is
+mostly noise. The `floors` job
+runs after publish/deploy with `if: always()`, so a violation fails the workflow at the end but
+never stops the charts from updating. Raise a floor only with evidence from several runs. `ci.yml`'s `build-linux` job, on push to
 `main` only (never on PRs), after its closure audit and `ctest`, copies `build/llvm-ld-direct`
 aside as the candidate, checks the link-speed payload files out at `BASELINE_REF`, rebuilds
 incrementally, copies the baseline, and restores the files (no third rebuild). It then uploads
@@ -207,12 +230,14 @@ derivation from `provenance/payload-prune.json` exists in `ci.yml` and twice in
 `link-benchmark.yml` (download verification and the fallback build) and must stay identical. Drift
 is not silent: `link-benchmark` falls back to a cold build, and the step summary states which path
 ran. clang was picked over a runner-image default because it matches the compiler the benchmark
-already records and the clang-generated corpora, and because compile caches key on the compiler,
-so one warm sccache serves both workflows.
+already records and the clang-generated corpora.
 
-zccache (PR #18) was closed as superseded for the benchmark: `ci.yml`'s `build-linux` now caches
-its build tree with zccache 1.14.0 `snapshot`/`replay` via `tools/ci_build.py` (#21), while compile
-caching stays on sccache.
+Compile caching: **zccache, not sccache** (owner decision, 2026-09-19). `link-benchmark` uses no
+sccache at all: every C++ build runs through `ci-job`, whose cache group names the zccache entry
+(`zccache-<os>-<arch>-<group>-<sha>`, restored by prefix; jobs compiling identical commands share a
+group, e.g. `linux-clang-release`). `ci.yml`'s `build-linux` caches its build tree with zccache
+`snapshot`/`replay` via `tools/ci_build.py` (#21); its compile cache and the other workflows are
+being moved onto `ci-job` (#57 ci/correctness/benchmark, #58 release, #59 closure-discovery).
 
 ### What the numbers mean, and the trap they avoid
 

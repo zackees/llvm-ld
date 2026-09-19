@@ -295,7 +295,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cxx", default="clang++")
     parser.add_argument("--nice", type=int, default=0, help="run builds and training under nice -n N")
     parser.add_argument("--launcher", default="none",
-                        help="compiler launcher (e.g. sccache in CI); 'none' by default")
+                        help="compiler launcher (zccache in CI); 'none' by default")
     return parser.parse_args(argv)
 
 
