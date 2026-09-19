@@ -93,7 +93,12 @@ def launcher_args(launcher: str) -> list[str]:
     """Compiler launcher (zccache in CI). Explicitly empty for "none", so a launcher recorded in a
     reused CMakeCache.txt is cleared rather than kept."""
     value = "" if launcher == "none" else launcher
-    return [f"-DCMAKE_C_COMPILER_LAUNCHER={value}", f"-DCMAKE_CXX_COMPILER_LAUNCHER={value}"]
+    args = [f"-DCMAKE_C_COMPILER_LAUNCHER={value}", f"-DCMAKE_CXX_COMPILER_LAUNCHER={value}"]
+    if launcher != "none":
+        # As LLVM does for sccache: PCH compiles are not cacheable (the root CMakeLists.txt applies
+        # this for zccache too; the standalone tablegen configure needs it passed).
+        args.append("-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON")
+    return args
 
 
 def configure_command(host: Host, build_dir: Path, toolchain: list[str] | None = None,
