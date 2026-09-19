@@ -23,9 +23,11 @@ the link without `/debug`, and the **hatched** segment is the extra time `/debug
 write the PDB, which is where the patches work. When that extra time is inside run-to-run noise
 (ThinLTO, where codegen dominates), the cell shows a plain bar and says so.
 
-Every number is a paired A/B measured in a single run on a single machine: the current linker
-against a baseline built from the payload as it stood before the link-speed patches, linking the
-same corpus interleaved. Hosted runners are shared and noisy, so times are only ever compared within
+Every number is a paired A/B measured in a single run on a single machine: llvm-ld as it is built
+to be fast (the link-speed patches plus PGO, ThinLTO and BOLT, via `tools/pgo_build.py`) against
+stock lld from the same LLVM 23.1.0 payload before the patches, built plain (`-O3`), linking the
+same corpus interleaved. The patches mostly speed up PDB emission; PGO and BOLT speed up
+everything, including LTO codegen. Hosted runners are shared and noisy, so times are only ever compared within
 one run. Every cell is gated on byte-identical output: `tests/perf/bench.py` refuses to report a
 timing unless the candidate's EXE (and PDB, when one is written) match the baseline's exactly and
 both are self-deterministic.

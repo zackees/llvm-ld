@@ -216,7 +216,10 @@ PALETTES = {
     },
 }
 INK = PALETTES["dark"]
-SIDES = (("baseline", "stock lld-link"), ("candidate", "llvm-ld"))
+# The benchmark compares llvm-ld as it is built to be fast (the link-speed patches, plus PGO,
+# ThinLTO and BOLT via tools/pgo_build.py) against stock lld from the same LLVM 23.1.0 payload,
+# built plain (-O3). Both labels say exactly that, because both factors are in the numbers.
+SIDES = (("baseline", "stock lld-link (plain -O3)"), ("candidate", "llvm-ld (patches + PGO + BOLT)"))
 
 FONT_STACK = "system-ui,-apple-system,Segoe UI,Roboto,sans-serif"
 # Approximate advance per character at 12px for manual text flow. The only
@@ -865,9 +868,12 @@ img{{max-width:100%;height:auto}}code,pre{{overflow-wrap:anywhere;white-space:pr
 </head><body>
 <h1>llvm-ld link speed</h1>
 <p>How long a link takes, and where llvm-ld saves the time, right now. Every number is
-a paired A/B measured in one run on one machine: the current linker against a
-baseline built from the payload as it stood before the link-speed patches,
-linking the same corpora interleaved. Hosted runners are shared and noisy, so
+a paired A/B measured in one run on one machine: llvm-ld as it is built to be
+fast (the link-speed patches plus PGO, ThinLTO and BOLT, via
+tools/pgo_build.py) against stock lld from the same LLVM 23.1.0 payload before
+the link-speed patches, built plain (-O3), linking the same corpora interleaved.
+Both factors are in the numbers: the source patches speed up PDB emission, and
+PGO + BOLT speed up everything, including LTO codegen. Hosted runners are shared and noisy, so
 times are only compared within a run, never across runs.</p>
 <p>Every cell is gated on byte-identical output: the candidate's EXE (and PDB,
 when the variant writes one) match the baseline's exactly, and both are
@@ -939,7 +945,10 @@ def command_render(args: argparse.Namespace) -> int:
         "runner": runner,
         "baseline": {
             "ref": args.baseline_ref,
-            "description": "payload before the link-speed patches",
+            "description": "stock lld: the payload before the link-speed patches, plain -O3 build",
+        },
+        "candidate": {
+            "description": "llvm-ld: link-speed patches + PGO + ThinLTO + BOLT (tools/pgo_build.py all --bolt)",
         },
         "modes": modes_summary(),
         "variants": variants_summary(),

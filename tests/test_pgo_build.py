@@ -42,6 +42,16 @@ class PgoBuildFlagsTest(unittest.TestCase):
         plain = pgo.optimize_flags(pathlib.Path("/p/x.profdata"))
         self.assertFalse(any("-rpath" in f for f in plain))
 
+    def test_bolt_keeps_relocations_and_folds_safely(self) -> None:
+        exe = next(f for f in pgo.optimize_flags(pathlib.Path("/p/x.profdata"), None, bolt=True)
+                   if f.startswith("-DCMAKE_EXE_LINKER_FLAGS="))
+        self.assertIn("-Wl,--emit-relocs", exe)
+        plain = next(f for f in pgo.optimize_flags(pathlib.Path("/p/x.profdata"))
+                     if f.startswith("-DCMAKE_EXE_LINKER_FLAGS="))
+        self.assertNotIn("--emit-relocs", plain)
+        self.assertIn("-icf=safe", pgo.BOLT_OPTIMIZE_FLAGS)
+        self.assertFalse(any(f in ("-icf=1", "-icf=all") for f in pgo.BOLT_OPTIMIZE_FLAGS))
+
     def test_builds_share_ci_configure_flags(self) -> None:
         base = pgo.ci_build.configure_command(pathlib.Path("/w"), pathlib.Path("/b"), "none",
                                               "clang", "clang++", None, extra_args=[])

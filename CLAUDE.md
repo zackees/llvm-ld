@@ -105,6 +105,15 @@ explicit path (or `rg --no-ignore`) when you actually need to read LLVM optimize
 
 ### Do not retry (measured, rejected)
 
+- **mimalloc-pprof as the Linux llvm-ld-direct allocator** (`MI_MALLOC_OVERRIDE` on Linux,
+  codegen round 1): 10.4% *slower* on a ThinLTO link and +93% peak RSS. The vendored
+  mimalloc-pprof calls `_mi_memevt_on_alloc`/`_on_free` (profiler event hooks, compiled in
+  unconditionally) on every allocation: 4.4% of the link by themselves. `upstream/` is read-only.
+- **Native-integer fast paths in `ConstantRange::multiply`** (codegen rounds 3-4): the #1
+  allocation site by count (wide APInt temporaries), proven identical on 9.5M differential calls,
+  but +0.2% wall: allocation *count* was a poor proxy (glibc's tcache makes them cheap) and most
+  SCEV ranges are too wide for the fast path. Not worth a payload patch.
+
 - **Forcing in-memory output buffers** (`FileOutputBuffer::F_mmap` for the PE and PDB):
   measurably *worse*. The commit cost is kernel writeback, not the buffer strategy.
 - **Coalescing contiguous block writes in `WritableMappedBlockStream::writeBytes`**: read as +3%
@@ -175,7 +184,9 @@ unchanged commit would only add runner noise to the published numbers.
 
 ### Where the binaries come from
 
-link-benchmark does not compile LLVM in its common path. `ci.yml`'s `build-linux` job, on push to
+link-benchmark takes the **baseline** from ci.yml (below) and always builds the **candidate** itself
+with `tools/pgo_build.py all --bolt` (patches + PGO + ThinLTO + BOLT, sccache-backed; the measure
+job timeout is 360 min for that). The plain candidate in the ci.yml artifact is no longer measured. `ci.yml`'s `build-linux` job, on push to
 `main` only (never on PRs), after its closure audit and `ctest`, copies `build/llvm-ld-direct`
 aside as the candidate, checks the link-speed payload files out at `BASELINE_REF`, rebuilds
 incrementally, copies the baseline, and restores the files (no third rebuild). It then uploads
@@ -303,9 +314,25 @@ corpus (Release medium + PDB, +14.4%) matched the held-out ones, so the profile 
   function above ~7%), which is where PGO/LTO of the binary pays; no-PDB links are ~50% kernel.
 - NixOS: `-fuse-ld=lld` bypasses the cc-wrapper, so `optimize` probes a normally linked C++
   program's RUNPATH and repeats it (`runtime_rpath`); elsewhere the probe finds none.
-- The `link-benchmark` charts stay non-PGO on both sides: they measure the link-speed patches, and
-  a PGO candidate against a plain baseline would mix in compiler-flag gains (#42). Shipping PGO in
-  user-facing builds is #44.
+- `--bolt` (Linux) adds a BOLT post-link layout stage on top of PGO (`all --bolt`, or
+  `optimize --bolt` then `bolt`; needs `llvm-bolt`/`merge-fdata`, `--bolt-dir`). Safe ICF only.
+- The `link-benchmark` candidate is built with `all --bolt` (owner decision, 2026-09-19): the
+  chart shows llvm-ld as built to be fast (patches + PGO + ThinLTO + BOLT) against stock lld from
+  the same payload built plain (-O3), and both labels say so. Shipping PGO in release builds is
+  #44/#46.
+
+### Codegen optimization rounds (2026-09-19), ThinLTO small + PDB, /threads:4, all byte-identical
+
+Each round: profile (perf; heaptrack for allocations), pick the top target, change, gated A/B.
+Starting point: the PGO + ThinLTO build (36.6% IR optimizer, 17.6% X86 codegen, **10.1% glibc
+malloc/free**, then a flat tail: SCEV getRangeRef 3.1%, computeKnownBits 2.8%, ...).
+
+| round | target | change | result | verdict |
+|---|---|---|---|---|
+| 1 | glibc malloc/free (10%) | mimalloc `MI_MALLOC_OVERRIDE` for Linux llvm-ld-direct | -10.4% wall, +93% peak RSS | rejected |
+| 2 | flat profile: i-cache/branch layout | BOLT on top of PGO | **+6.1% wall, -5.5% CPU** (+0% on a non-LTO PDB link) | **kept** (`--bolt`) |
+| 3 | #1 allocation site (heaptrack: 9.3M of 59.9M allocs) | `ConstantRange::multiply` unsigned fast path in native ints | +0.2% (noise) | rejected |
+| 4 | same site, signed path | signed fast path | +0.2% (noise) | rejected |
 
 ## CI build script and build-tree cache (#21)
 
