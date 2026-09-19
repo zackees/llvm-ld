@@ -37,6 +37,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Callable
@@ -341,8 +342,40 @@ def audit_closure(build: str, trace: str, output: str, extra: list[str] | None =
         "provenance/llvm-source-closure.json", *(extra or []), "--output", output])
 
 
-def launcher_or_none() -> str:
-    return "zccache" if shutil.which("zccache") else "none"
+def launcher_or_none(compiler: str | None = None) -> str:
+    """The compiler launcher for this job: zccache when it is installed and, for `compiler`, works.
+
+    zccache 1.14.3 mangles /showIncludes on Windows, so every cl/clang-cl compile fails on the
+    first edge (zackees/zccache#1603): ci-windows spent 69 min building three times uncached after
+    the bypass retry. One tiny compile through zccache decides it up front, so a broken launcher
+    costs a second instead of a failed build, and the probe starts passing by itself once the bug
+    is fixed upstream. Bypassing also re-enables precompiled headers (the root CMakeLists.txt keys
+    its PCH rule on the launcher), which is the right trade when nothing is cached anyway."""
+    if not shutil.which("zccache") or os.environ.get("ZCCACHE_DISABLE") == "1":
+        return "none"
+    if compiler and not zccache_compiles(compiler):
+        return "none"
+    return "zccache"
+
+
+def zccache_compiles(compiler: str) -> bool:
+    """True when `zccache <compiler> ...` compiles a trivial TU the way CMake would invoke it."""
+    msvc = compiler.endswith("cl") or compiler.endswith("cl.exe")
+    with tempfile.TemporaryDirectory() as tmp:
+        source = Path(tmp, "probe.cpp")
+        source.write_text("int probe() { return 0; }\n")
+        if msvc:
+            command = ["zccache", compiler, "/nologo", "/c", "/showIncludes",
+                       f"/Fo{Path(tmp, 'probe.obj')}", str(source)]
+        else:
+            command = ["zccache", compiler, "-c", "-o", str(Path(tmp, "probe.o")), str(source)]
+        probe = subprocess.run(command, capture_output=True, text=True, cwd=tmp)
+    if probe.returncode == 0:
+        return True
+    log(f"::warning::zccache cannot compile through {compiler} ({probe.stderr.strip()[:200]}); "
+        "building without a compiler launcher (zackees/zccache#1603)")
+    summary(f"- zccache: unusable with {compiler}; this job builds uncached (zackees/zccache#1603)")
+    return False
 
 
 def cmake_build(build: str, targets: list[str]) -> None:
@@ -364,7 +397,12 @@ def msvc_build(build: str, cmake_args: list[str], targets: list[str], trace: str
         sh(command)
         cmake_build(build, targets)
 
-    attempt(launcher_or_none())
+    attempt(launcher_or_none(msvc_compiler()))
+
+
+def msvc_compiler() -> str:
+    """The compiler CMake picks from the MSVC developer environment."""
+    return "clang-cl" if os.environ.get("CC", "").startswith("clang-cl") else "cl"
 
 
 def buildtree_cache() -> tuple[str, str, str]:
@@ -470,7 +508,7 @@ def provision_xwin() -> None:
 def job_ci_linux_cross(args: argparse.Namespace) -> None:
     provision_xwin()
     os.environ["LLVM_LD_XWIN_ROOT"] = str(xwin_root())
-    launcher = launcher_or_none()
+    launcher = launcher_or_none("clang-cl")
     launch = [f"-DCMAKE_C_COMPILER_LAUNCHER={launcher if launcher != 'none' else ''}",
               f"-DCMAKE_CXX_COMPILER_LAUNCHER={launcher if launcher != 'none' else ''}"]
     if launcher != "none":  # the standalone configure does not read the root CMakeLists.txt rule
@@ -496,7 +534,7 @@ def job_ci_linux_cross(args: argparse.Namespace) -> None:
         cmake_build("build-cross", ["llvm_ld", "abi_smoke", "abi_contract", "abi_state_test", "allocator-probe",
                                     "llvm-ld-runner", "llvm-ld-direct"])
 
-    cross(launcher_or_none())
+    cross(launcher)
     audit_closure("build-cross", "cmake-trace-cross.jsonl", "source-closure-linux-cross.json",
                   ["--native-tool-dir", "build-tblgen/bin"])
     # The import library's symbol table lists exactly the exports (plus __imp_ twins and three

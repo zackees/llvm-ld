@@ -52,6 +52,38 @@ class JobTableTest(unittest.TestCase):
                 self.assertTrue(job.artifact_dir, job.name)
 
 
+class LauncherProbeTest(unittest.TestCase):
+    def test_a_working_probe_selects_zccache(self):
+        with mock.patch.object(ci_jobs.shutil, "which", return_value="/usr/bin/zccache"), \
+                mock.patch.object(ci_jobs, "zccache_compiles", return_value=True):
+            self.assertEqual(ci_jobs.launcher_or_none("cl"), "zccache")
+
+    def test_a_broken_probe_builds_without_a_launcher(self):
+        with mock.patch.object(ci_jobs.shutil, "which", return_value="/usr/bin/zccache"), \
+                mock.patch.object(ci_jobs, "zccache_compiles", return_value=False):
+            self.assertEqual(ci_jobs.launcher_or_none("cl"), "none")
+
+    def test_the_probe_is_skipped_when_zccache_is_bypassed(self):
+        probes = []
+        with mock.patch.dict(os.environ, {"ZCCACHE_DISABLE": "1"}), \
+                mock.patch.object(ci_jobs.shutil, "which", return_value="/usr/bin/zccache"), \
+                mock.patch.object(ci_jobs, "zccache_compiles", side_effect=lambda c: probes.append(c)):
+            self.assertEqual(ci_jobs.launcher_or_none("cl"), "none")
+        self.assertEqual(probes, [])
+
+    def test_the_probe_invokes_the_compiler_in_its_own_dialect(self):
+        seen = {}
+
+        def fake_run(command, **kwargs):
+            seen["command"] = command
+            return ci_jobs.subprocess.CompletedProcess(command, 0, "", "")
+        with mock.patch.object(ci_jobs.subprocess, "run", side_effect=fake_run):
+            self.assertTrue(ci_jobs.zccache_compiles("cl"))
+            self.assertIn("/showIncludes", seen["command"])
+            self.assertTrue(ci_jobs.zccache_compiles("clang++"))
+            self.assertIn("-c", seen["command"])
+
+
 class CachePolicyTest(unittest.TestCase):
     def test_only_main_and_dispatches_save(self):
         main = {"GITHUB_REF": "refs/heads/main"}
