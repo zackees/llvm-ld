@@ -246,6 +246,11 @@ probe or build fails the job immediately: CI must never retry with `ZCCACHE_DISA
 drop the launcher, because that would hide a zccache regression. zccache's client also
 fails a compile that has not answered in 180 s with exit 113; `ZCCACHE_WEDGE_RECV_TIMEOUT_SECS`
 is raised to 3600 for every job, because instrumented SelectionDAGBuilder.cpp takes longer.
+zccache will not cache a cl/clang-cl compile that names a PDB side output (`/Fd`), and CMake's
+Ninja rule passes `/Fd<target>.pdb` to every such compile, so every Windows and cross compile was
+non-cacheable (PR #48's cross build: 0 hits, 1685 non-cacheable). The root `CMakeLists.txt` drops
+`/Fd` from the rule in Release builds without `/Zi`, where no PDB is written and the object is
+unchanged. Check `non_cacheable` in a job's zccache stats before assuming a cache works.
 release.yml (#58) runs `release-corpus` and `release-build`
 (cache group `release-<triple>`) through it too; tags and PRs restore what main saves, and a
 weekly scheduled run on main keeps those caches warm (skipped when main has not moved). The PGO
