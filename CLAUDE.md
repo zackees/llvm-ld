@@ -240,7 +240,14 @@ support in zccache is partial, and zccache has failed compiles with no diagnosti
 job that fails is rerun once with `ZCCACHE_DISABLE=1` (ninja resumes; only the remaining compiles
 run uncached), with a `::warning::`, and counts as cold (never sccache). zccache's client also
 fails a compile that has not answered in 180 s with exit 113; `ZCCACHE_WEDGE_RECV_TIMEOUT_SECS`
-is raised to 3600 for every job, because instrumented SelectionDAGBuilder.cpp takes longer. release (#58) and closure-discovery (#59) are next.
+is raised to 3600 for every job, because instrumented SelectionDAGBuilder.cpp takes longer.
+release.yml (#58) runs `release-corpus` and `release-build`
+(cache group `release-<triple>`) through it too; tags and PRs restore what main saves, and a
+weekly scheduled run on main keeps those caches warm (skipped when main has not moved). The PGO
+builds use an uninstrumented native tablegen (`LLVM_NATIVE_TOOL_DIR`): instrumented, tablegen
+stalled the aarch64 Linux leg for 5.5 h at `Building Options.inc` (run 35443823220). musl legs
+build in Alpine with the host's static zccache binary and cache directory mounted.
+closure-discovery (#59) is next.
 
 `tools/audit_build.py` resolves and hashes each path once (it used to redo it for all ~1M
 `ninja -t deps` lines: 151 s -> 4 s locally, identical closure output).

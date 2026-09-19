@@ -16,6 +16,11 @@ name: release
 # Each leg then gates on the previous release: its runner and the new runner link the same
 # corpora and must produce byte-identical EXE and PDB, so neither PGO nor the compiler switch
 # (gcc -> clang, MSVC -> clang-cl) can change what the linker outputs.
+#
+# Every job is the ci-job template over tools/ci_jobs.py (#55, #58): release-corpus and
+# release-build, the latter under a per-triple zccache. Tags and PRs restore the caches that main
+# saves; the weekly scheduled run on main builds every leg (never publishing) to keep them warm,
+# and skips itself when main has not moved since its last green run.
 
 on:
   push:
@@ -25,7 +30,11 @@ on:
       - .github/workflows/release.yml
       - tools/release_build.py
       - tests/perf/gen_corpus.py
+      - tools/ci_jobs.py
+      - .github/actions/ci-job/**
   workflow_dispatch:
+  schedule:
+    - cron: '23 5 * * 0'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -35,26 +44,40 @@ permissions:
   contents: read
 
 jobs:
-  # Training and gate corpora for every leg: freestanding C++ compiled by clang to Windows COFF,
-  # so they are host-independent inputs. Generated once, downloaded by each leg.
-  corpus:
+  precheck:
     runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != schedule ]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          last=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml/runs?event=schedule&branch=main&status=success&per_page=1" --jq '.workflow_runs[0].head_sha // ""')
+          if [ "$last" = "$GITHUB_SHA" ]; then echo "run=false" >> "$GITHUB_OUTPUT"; else echo "run=true" >> "$GITHUB_OUTPUT"; fi
+
+  # Training and gate corpora for every leg: freestanding C++ compiled by clang to Windows COFF,
+  # so they are host-independent inputs. Generated once (cached by exact input), downloaded by
+  # each leg.
+  corpus:
+    needs: precheck
+    if: needs.precheck.outputs.run == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v4
-      - name: Generate the PGO training and gate corpora
-        run: |
-          set -euo pipefail
-          for mp in "debug small" "debug medium" "release small" "release medium" "thinlto small"; do
-            set -- $mp
-            python3 tests/perf/gen_corpus.py --out pgo-corpus --mode "$1" --profile "$2" --jobs "$(nproc)"
-          done
-          find pgo-corpus -name '*.cpp' -delete
-          tar czf pgo-corpus.tar.gz pgo-corpus
-          du -sh pgo-corpus pgo-corpus.tar.gz
+      - uses: ./.github/actions/ci-job
+        with:
+          job: release-corpus
       - uses: actions/upload-artifact@v4
         with:
           name: pgo-corpus
-          path: pgo-corpus.tar.gz
+          path: release-corpus/pgo-corpus.tar.gz
           retention-days: 7
 
   build:
@@ -63,6 +86,9 @@ jobs:
     runs-on: ${{ matrix.runner }}
     # Two full builds (instrumented, then PGO + ThinLTO) plus training and the gate.
     timeout-minutes: 360
+    permissions:
+      contents: read
+      actions: write
     strategy:
       fail-fast: false
       matrix:
@@ -77,91 +103,21 @@ jobs:
           - { triple: x86_64-apple-darwin,       runner: macos-14,         kind: macos }
     steps:
       - uses: actions/checkout@v4
-
-      - name: Version
-        id: version
-        shell: bash
-        run: |
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then v="$GITHUB_REF_NAME"; else v="v0.0.0-${GITHUB_SHA::12}"; fi
-          echo "value=$v" >> "$GITHUB_OUTPUT"
-
       - uses: actions/download-artifact@v4
         with:
           name: pgo-corpus
-
-      - name: Unpack corpora and fetch the previous release for the gate
-        id: reference
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          tar xzf pgo-corpus.tar.gz
-          prev=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --exclude-drafts --exclude-pre-releases --json tagName --jq '.[0].tagName')
-          test -n "$prev" || { echo "::error::no previous release to gate against"; exit 1; }
-          mkdir -p reference
-          gh release download "$prev" --repo "$GITHUB_REPOSITORY" -D reference -p "llvm-ld-coff-$prev-${{ matrix.triple }}.*"
-          archive=$(ls reference/llvm-ld-coff-*)
-          echo "previous release $prev: $archive"
-          echo "archive=$archive" >> "$GITHUB_OUTPUT"
-          echo "### PGO gate against $prev" >> "$GITHUB_STEP_SUMMARY"
-
       - if: matrix.kind == 'windows'
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: ${{ matrix.msvc_arch }}
-
-      - name: clang toolchain (Windows)
-        if: matrix.kind == 'windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if (-not (Get-Command clang-cl -ErrorAction SilentlyContinue)) {
-            choco install llvm -y --no-progress
-            echo "C:\Program Files\LLVM\bin" >> $env:GITHUB_PATH
-          }
-
-      - name: Build and package (Windows)
-        if: matrix.kind == 'windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
-          clang-cl --version
-          python tools/release_build.py --triple ${{ matrix.triple }} --version ${{ steps.version.outputs.value }} --pgo --train-corpus pgo-corpus --reference ${{ steps.reference.outputs.archive }}
-
-      - name: Build and package (Linux glibc)
-        if: matrix.kind == 'linux'
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y ninja-build clang lld llvm libclang-rt-dev
-          clang --version
-          python3 tools/release_build.py --triple ${{ matrix.triple }} --version ${{ steps.version.outputs.value }} --pgo --train-corpus pgo-corpus --reference ${{ steps.reference.outputs.archive }}
-
-      # musl builds inside Alpine on the same-architecture runner, so the library links musl and
-      # its tests run natively.
-      - name: Build and package (Linux musl)
-        if: matrix.kind == 'musl'
-        run: |
-          set -euo pipefail
-          docker run --rm -v "$PWD:/src" -w /src -e GITHUB_STEP_SUMMARY=/src/step-summary.md alpine:3.20 sh -euc '
-            apk add --no-cache build-base cmake ninja python3 linux-headers git clang lld llvm compiler-rt
-            clang --version
-            python3 tools/release_build.py --triple ${{ matrix.triple }} --version ${{ steps.version.outputs.value }} --pgo --train-corpus pgo-corpus --reference ${{ steps.reference.outputs.archive }}
-          '
-          cat step-summary.md >> "$GITHUB_STEP_SUMMARY" || true
-          sudo chown -R "$(id -u):$(id -g)" dist build-release build-release-instr
-
-      - name: Build and package (macOS)
-        if: matrix.kind == 'macos'
-        run: |
-          set -euo pipefail
-          brew install ninja
-          clang --version
-          python3 tools/release_build.py --triple ${{ matrix.triple }} --version ${{ steps.version.outputs.value }} --pgo --train-corpus pgo-corpus --reference ${{ steps.reference.outputs.archive }}
-
+      # release-build: toolchain (apt clang/lld, brew ninja, choco LLVM), the previous release for
+      # the gate, then tools/release_build.py --pgo under this triple's zccache (musl: inside
+      # Alpine, with the host's static zccache and cache directory mounted).
+      - uses: ./.github/actions/ci-job
+        with:
+          job: release-build
+          label: release:${{ matrix.triple }}
+          args: --triple ${{ matrix.triple }}
       - uses: actions/upload-artifact@v4
         with:
           name: llvm-ld-coff-${{ matrix.triple }}
