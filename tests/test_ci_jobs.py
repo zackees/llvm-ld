@@ -60,9 +60,11 @@ class CachePolicyTest(unittest.TestCase):
         self.assertFalse(ci_jobs.saves_caches({"GITHUB_REF": "refs/pull/1/merge", "GITHUB_EVENT_NAME": "pull_request"}))
         self.assertFalse(ci_jobs.saves_caches({"GITHUB_REF": "refs/tags/v1", "GITHUB_EVENT_NAME": "push"}))
 
-    def test_warm_means_zero_misses(self):
-        self.assertTrue(ci_jobs.is_warm({"status": "ok", "hits": 10, "misses": 0}))
-        self.assertFalse(ci_jobs.is_warm({"status": "ok", "hits": 10, "misses": 1}))
+    def test_warm_means_nearly_every_compile_was_a_hit(self):
+        self.assertTrue(ci_jobs.is_warm({"status": "ok", "hits": 1755, "misses": 36}))
+        self.assertTrue(ci_jobs.is_warm({"status": "ok", "hits": 0, "misses": 0}))
+        self.assertFalse(ci_jobs.is_warm({"status": "ok", "hits": 10, "misses": 10}))
+        self.assertFalse(ci_jobs.is_warm({"status": "ok", "hits": 0, "misses": 1792}))
         self.assertFalse(ci_jobs.is_warm({"status": "error"}))
         self.assertFalse(ci_jobs.is_warm(None))
 

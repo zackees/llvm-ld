@@ -362,9 +362,21 @@ def call_with_bypass_retry(job: Job, body: Callable[[argparse.Namespace], None],
         body(args)
 
 
+# A job is warm when nearly every compile came from the cache. Not "zero misses": a GitHub cache
+# entry is immutable, so whatever a key was saved with is what later runs get, and a job that
+# compiles anything new (bench-plain rebuilds six payload files at BASELINE_REF) keeps missing on
+# those few objects for as long as that key lives. 1755 hits / 36 misses is a warm run by any
+# useful definition; 0 misses would make the CI-time floors unenforceable forever.
+WARM_HIT_RATIO = 0.9
+
+
 def is_warm(stats: dict | None) -> bool:
-    """Warm = every compile was served from the cache."""
-    return bool(stats) and stats.get("status") == "ok" and stats.get("misses", 1) == 0
+    if not stats or stats.get("status") != "ok":
+        return False
+    hits, misses = stats.get("hits") or 0, stats.get("misses") or 0
+    if hits + misses == 0:  # nothing compiled at all (a build-tree or artifact cache hit)
+        return True
+    return hits / (hits + misses) >= WARM_HIT_RATIO
 
 
 # ------------------------------------------------------------------ commands
