@@ -241,9 +241,13 @@ on it too: `ci-linux`, `ci-linux-cross`, `ci-windows`, `correctness-coff`, `benc
 with warm-run time floors per job (`warm_max_minutes`, checked last by the template's `floor` step,
 reported but not enforced when cold). The three MSVC jobs share `windows-msvc-release`; `ci-windows`
 builds the system-baseline targets too so that one cache covers all three. cl.exe and clang-cl
-support in zccache is partial, and zccache has failed compiles with no diagnostic: any compiling
-job that fails is rerun once with `ZCCACHE_DISABLE=1` (ninja resumes; only the remaining compiles
-run uncached), with a `::warning::`, and counts as cold (never sccache). zccache's client also
+support in zccache is partial, and zccache has failed compiles with no diagnostic. Each job first
+probes zccache with one trivial compile (`zccache_compiles`), and a compiling job that still fails
+is retried in two stages, in this order: `ZCCACHE_DISABLE=1`, which keeps `zccache` on the compile
+command line and only bypasses it at run time **so ninja resumes**, and only then without a
+launcher at all, which changes every command line and rebuilds from scratch. Doing the second
+first cost build-linux 72 min on main (run 35477913994, 1914 of 1916 edges re-run). Both warn and
+make the job cold (never sccache). zccache's client also
 fails a compile that has not answered in 180 s with exit 113; `ZCCACHE_WEDGE_RECV_TIMEOUT_SECS`
 is raised to 3600 for every job, because instrumented SelectionDAGBuilder.cpp takes longer. release (#58) and closure-discovery (#59) are next.
 

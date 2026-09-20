@@ -45,6 +45,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import shutil
@@ -210,10 +211,30 @@ def cmd_merge(args: argparse.Namespace) -> int:
     return 0
 
 
+def drop_stale_profile_objects(out_dir: Path, profdata: Path) -> None:
+    """Discard an optimized tree built from a different profile.
+
+    `-fprofile-use=<file>` is invisible to CMake and ninja, so a rebuilt profile invalidates no
+    object. Mixing objects from two profiles makes the ThinLTO link fail with `linking module
+    flags 'ProfileSummary': IDs have conflicting values`, which is what a retrained retry produced
+    on llvm-ld's aarch64-musl release leg. Training is not deterministic, so every `merge` is a
+    new profile.
+    """
+    stamp = out_dir / ".pgo-profile.sha256"
+    digest = hashlib.sha256(profdata.read_bytes()).hexdigest()
+    recorded = stamp.read_text().strip() if stamp.is_file() else None
+    if out_dir.is_dir() and recorded != digest:
+        print(f"pgo_build: profile changed; discarding {out_dir}", flush=True)
+        shutil.rmtree(out_dir, ignore_errors=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(digest + "\n")
+
+
 def cmd_optimize(args: argparse.Namespace) -> int:
     profdata = args.instr_dir.resolve() / PROFDATA_NAME
     if not profdata.exists():
         raise SystemExit(f"{profdata} missing: run `merge` first")
+    drop_stale_profile_objects(args.out_dir, profdata)
     build(args.workspace, args.out_dir, optimize_flags(profdata, runtime_rpath(args.cxx), args.bolt), args)
     print(f"built {args.out_dir / TARGET}")
     return 0

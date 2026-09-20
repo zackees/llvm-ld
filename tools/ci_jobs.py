@@ -351,7 +351,11 @@ def launcher_or_none(compiler: str | None = None) -> str:
     costs a second instead of a failed build, and the probe starts passing by itself once the bug
     is fixed upstream. Bypassing also re-enables precompiled headers (the root CMakeLists.txt keys
     its PCH rule on the launcher), which is the right trade when nothing is cached anyway."""
-    if not shutil.which("zccache") or os.environ.get("ZCCACHE_DISABLE") == "1":
+    # ZCCACHE_DISABLE is deliberately NOT consulted here: the bypass retry must keep the launcher on
+    # the compile command line, or every object is invalidated and ninja rebuilds from scratch
+    # (main run 35477913994: the retry re-ran 1914 of 1916 edges, 72 min for build-linux). Only
+    # NO_LAUNCHER, the second-stage fallback, reconfigures without it.
+    if not shutil.which("zccache") or os.environ.get("LLVM_LD_NO_LAUNCHER") == "1":
         return "none"
     if compiler and not zccache_compiles(compiler):
         return "none"
@@ -679,22 +683,42 @@ def session_end(session: str) -> dict:
 
 
 def call_with_bypass_retry(job: Job, body: Callable[[argparse.Namespace], None], args: argparse.Namespace) -> None:
-    """Run a compiling job's body; if it fails, run it once more with zccache bypassed
-    (ZCCACHE_DISABLE=1: every compile goes straight to the compiler). Ninja resumes where it
-    stopped, so only the remaining compiles run uncached. zccache has failed compiles with no
-    compiler diagnostic (exit 113 on a slow compile; a silent failure of the instrumented
-    PassBuilder.cpp inside Alpine), and a cache fault must cost time, not a red build. A real
-    compile error fails the second attempt too. The fallback is a warning and is recorded."""
+    """Run a compiling job's body, retrying a zccache fault without losing the build.
+
+    zccache fails compiles with no compiler diagnostic (exit 113 from a SIGTERM'd compile, a lost
+    daemon under load, /showIncludes mangled on Windows: zackees/zccache#1603), and a cache fault
+    must cost time, not a red build. Two stages, in this order for a reason:
+
+    1. `ZCCACHE_DISABLE=1` keeps `zccache` on the compile command line and only bypasses it at
+       run time, so ninja's commands are unchanged and the build RESUMES.
+    2. Only if that fails too, drop the launcher entirely, which changes every command line and
+       costs a full rebuild.
+
+    Doing 2 first is what made build-linux take 72 min on main (run 35477913994). A real compile
+    error fails every stage. Each fallback warns, is recorded, and makes the job cold."""
+    stages = [
+        ("ZCCACHE_DISABLE", "bypassing zccache at run time (the build resumes)"),
+        ("LLVM_LD_NO_LAUNCHER", "without a compiler launcher (this rebuilds from scratch)"),
+    ]
     try:
         body(args)
+        return
     except (subprocess.CalledProcessError, SystemExit):
-        if job.cache_group is None or os.environ.get("ZCCACHE_DISABLE") == "1":
+        if job.cache_group is None:
             raise
-        log(f"::warning::{job.name} failed under zccache; retrying once with zccache bypassed (ZCCACHE_DISABLE=1)")
-        summary(f"- zccache: {job.name} failed under zccache and was retried with the cache bypassed")
-        os.environ["ZCCACHE_DISABLE"] = "1"
+    for index, (variable, description) in enumerate(stages):
+        if os.environ.get(variable) == "1":
+            continue
+        log(f"::warning::{job.name} failed under zccache; retrying {description}")
+        summary(f"- zccache: {job.name} failed; retried {description}")
+        os.environ[variable] = "1"
         args.bypassed = True
-        body(args)
+        try:
+            body(args)
+            return
+        except (subprocess.CalledProcessError, SystemExit):
+            if index == len(stages) - 1:
+                raise
 
 
 # A job is warm when nearly every compile came from the cache. Not "zero misses": a GitHub cache

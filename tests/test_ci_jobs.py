@@ -63,13 +63,15 @@ class LauncherProbeTest(unittest.TestCase):
                 mock.patch.object(ci_jobs, "zccache_compiles", return_value=False):
             self.assertEqual(ci_jobs.launcher_or_none("cl"), "none")
 
-    def test_the_probe_is_skipped_when_zccache_is_bypassed(self):
-        probes = []
+    def test_the_run_time_bypass_keeps_the_launcher_so_the_build_resumes(self):
+        """ZCCACHE_DISABLE must not change the compile command line; only NO_LAUNCHER does."""
         with mock.patch.dict(os.environ, {"ZCCACHE_DISABLE": "1"}), \
                 mock.patch.object(ci_jobs.shutil, "which", return_value="/usr/bin/zccache"), \
-                mock.patch.object(ci_jobs, "zccache_compiles", side_effect=lambda c: probes.append(c)):
+                mock.patch.object(ci_jobs, "zccache_compiles", return_value=True):
+            self.assertEqual(ci_jobs.launcher_or_none("cl"), "zccache")
+        with mock.patch.dict(os.environ, {"LLVM_LD_NO_LAUNCHER": "1"}), \
+                mock.patch.object(ci_jobs.shutil, "which", return_value="/usr/bin/zccache"):
             self.assertEqual(ci_jobs.launcher_or_none("cl"), "none")
-        self.assertEqual(probes, [])
 
     def test_the_probe_invokes_the_compiler_in_its_own_dialect(self):
         seen = {}
@@ -161,6 +163,22 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertEqual(len(records), 1)
 
+    def test_the_retry_escalates_from_run_time_bypass_to_dropping_the_launcher(self):
+        stages, fails = [], [True, True, False]
+
+        def flaky(args):
+            stages.append((os.environ.get("ZCCACHE_DISABLE"), os.environ.get("LLVM_LD_NO_LAUNCHER")))
+            if fails[len(stages) - 1]:
+                raise ci_jobs.subprocess.CalledProcessError(113, ["ninja"])
+        job = ci_jobs.Job("t-escalate", flaky, cache_group="g")
+        with mock.patch.dict(os.environ, {}), mock.patch.object(ci_jobs, "session_start", return_value=None):
+            for name in ("ZCCACHE_DISABLE", "LLVM_LD_NO_LAUNCHER"):
+                os.environ.pop(name, None)
+            status, records = self.run_job(job)
+        self.assertEqual(status, 0)
+        self.assertEqual(stages, [(None, None), ("1", None), ("1", "1")])
+        self.assertFalse(records[0]["warm"])
+
     def test_a_failure_under_zccache_is_retried_once_with_the_cache_bypassed(self):
         calls = []
 
@@ -170,7 +188,8 @@ class RunnerTest(unittest.TestCase):
                 raise ci_jobs.subprocess.CalledProcessError(113, ["ninja"])
         job = ci_jobs.Job("t-flaky", flaky, cache_group="g")
         with mock.patch.dict(os.environ, {}), mock.patch.object(ci_jobs, "session_start", return_value=None):
-            os.environ.pop("ZCCACHE_DISABLE", None)
+            for name in ("ZCCACHE_DISABLE", "LLVM_LD_NO_LAUNCHER"):
+                os.environ.pop(name, None)
             status, records = self.run_job(job)
         self.assertEqual((status, calls), (0, [None, "1"]))
         self.assertFalse(records[0]["warm"])
@@ -181,7 +200,8 @@ class RunnerTest(unittest.TestCase):
             raise ci_jobs.subprocess.CalledProcessError(1, ["ninja"])
         job = ci_jobs.Job("t-broken", broken, cache_group="g")
         with mock.patch.dict(os.environ, {}), mock.patch.object(ci_jobs, "session_start", return_value=None):
-            os.environ.pop("ZCCACHE_DISABLE", None)
+            for name in ("ZCCACHE_DISABLE", "LLVM_LD_NO_LAUNCHER"):
+                os.environ.pop(name, None)
             status, _ = self.run_job(job)
         self.assertEqual(status, 1)
 
