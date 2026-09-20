@@ -118,8 +118,33 @@ class FloorTest(unittest.TestCase):
 
     def test_every_build_job_outside_link_benchmark_has_a_floor(self):
         for job in ci_jobs.JOBS.values():
-            if job.cache_group and not job.name.startswith("bench-"):
+            # link-benchmark has its own floors (bench_floors.json); release legs are rarely warm.
+            if job.cache_group and not job.name.startswith(("bench-", "release-")):
                 self.assertIsNotNone(job.warm_max_minutes, job.name)
+
+
+class ReleaseJobTest(unittest.TestCase):
+    def test_each_triple_has_its_own_cache_group(self):
+        job = ci_jobs.JOBS["release-build"]
+        groups = {ci_jobs.cache_group(job, ci_jobs.argparse.Namespace(triple=t))
+                  for t in ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-musl")}
+        self.assertEqual(groups, {"release-x86_64-unknown-linux-gnu", "release-aarch64-unknown-linux-musl"})
+
+    def test_kinds(self):
+        self.assertEqual([ci_jobs.release_kind(t) for t in ("x86_64-pc-windows-msvc", "aarch64-unknown-linux-musl",
+                                                            "x86_64-apple-darwin", "aarch64-unknown-linux-gnu")],
+                         ["windows", "musl", "macos", "linux"])
+
+    def test_container_builds_are_never_warm(self):
+        job = ci_jobs.Job("t-container", lambda args: setattr(args, "unobserved", True), cache_group="g")
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"RUNNER_TEMP": tmp, "GITHUB_OUTPUT": "", "GITHUB_STEP_SUMMARY": ""}), \
+                mock.patch.dict(ci_jobs.JOBS, {job.name: job}), \
+                mock.patch.object(ci_jobs, "session_start", return_value="s"), \
+                mock.patch.object(ci_jobs, "session_end", return_value={"status": "ok", "misses": 0}):
+            ci_jobs.main(["run", job.name])
+            record = json.loads(next(pathlib.Path(tmp, "timing").glob("*.json")).read_text())
+        self.assertFalse(record["warm"])
 
 
 class RunnerTest(unittest.TestCase):

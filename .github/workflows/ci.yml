@@ -29,6 +29,8 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_pgo_build.py' -v
       - name: ci_jobs.py tests
         run: python -m unittest discover -s tests -p 'test_ci_jobs.py' -v
+      - name: release_build.py tests
+        run: python -m unittest discover -s tests -p 'test_release_build.py' -v
       - name: Timing configuration cannot enable profiling
         run: |
           unset MIMALLOC_DHAT MIMALLOC_DHAT_DUMP_AT_EXIT MIMALLOC_PROF_ACTIVE MI_PPROF
