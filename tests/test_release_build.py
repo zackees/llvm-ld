@@ -159,6 +159,17 @@ class PgoTest(unittest.TestCase):
         cmd = release_build.configure_command(release_build.HOSTS["x86_64-unknown-linux-gnu"], Path("b"))
         self.assertIn("-DCMAKE_CXX_COMPILER_LAUNCHER=", cmd)
 
+    def test_a_hung_link_fails_instead_of_burning_the_job_budget(self):
+        host = release_build.HOSTS["x86_64-unknown-linux-gnu"]
+
+        def hang(command, **kwargs):
+            raise release_build.subprocess.TimeoutExpired(command, kwargs["timeout"])
+        with mock.patch.object(release_build.subprocess, "run", side_effect=hang):
+            with self.assertRaises(SystemExit) as caught:
+                release_build.link_timed(host, Path("b"), Path("/corpus/release/medium"), 4, "pdb")
+        self.assertIn("hung", str(caught.exception))
+        self.assertIn("20 min", str(caught.exception))
+
     def test_profdata_tool_is_xcrun_on_macos(self):
         self.assertEqual(release_build.profdata_tool(release_build.HOSTS["x86_64-apple-darwin"]),
                          ["xcrun", "llvm-profdata"])

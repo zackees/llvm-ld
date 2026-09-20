@@ -233,14 +233,29 @@ def link(host: Host, directory: Path, corpus: Path, threads: int, variant: str, 
     return link_timed(host, directory, corpus, threads, variant, env)[0]
 
 
+# A single link of these corpora takes seconds to about two minutes, instrumented and on the
+# slowest hosted runner. A link that has not finished in 20 minutes is hung, not slow: an
+# instrumented aarch64 Linux leg hung in training and burned the whole 360-minute job budget
+# before the runner killed it, leaving an orphaned llvm-ld-runner behind (PR #61's release run
+# 35491949026; the same leg passed in 68 min on PR #48). Failing here names the link and leaves
+# five hours of runner time unspent.
+LINK_TIMEOUT_SECONDS = 20 * 60
+
+
 def link_timed(host: Host, directory: Path, corpus: Path, threads: int, variant: str,
                env: dict | None = None) -> tuple[float, float | None]:
     """(wall seconds, CPU seconds or None) of one link through `directory`'s runner."""
     runner = directory / host.runner
     cpu_before = child_cpu_seconds()
     start = time.perf_counter()
-    subprocess.run([str(runner), *link_args(threads, variant)], cwd=corpus, check=True,
-                   env=env or library_env(host, directory), stdout=subprocess.DEVNULL)
+    try:
+        subprocess.run([str(runner), *link_args(threads, variant)], cwd=corpus, check=True,
+                       env=env or library_env(host, directory), stdout=subprocess.DEVNULL,
+                       timeout=LINK_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        raise SystemExit(
+            f"release_build: {corpus.parent.name}/{corpus.name} /threads:{threads} {variant} did not "
+            f"finish in {LINK_TIMEOUT_SECONDS // 60} min through {runner}; treating it as hung")
     wall = time.perf_counter() - start
     cpu_after = child_cpu_seconds()
     return wall, (None if cpu_before is None else cpu_after - cpu_before)
