@@ -64,6 +64,24 @@ class PgoBuildFlagsTest(unittest.TestCase):
         self.assertIsNone(pgo.llvm_major("gcc (GCC) 15.2.0"))
 
 
+class StaleProfileTest(unittest.TestCase):
+    def test_a_changed_profile_discards_the_optimized_tree(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp) / "build-pgo"
+            profdata = pathlib.Path(tmp) / "llvm-ld.profdata"
+            out.mkdir()
+            (out / "stale.o").write_text("old")
+            profdata.write_bytes(b"one")
+            pgo.drop_stale_profile_objects(out, profdata)
+            self.assertFalse((out / "stale.o").exists())
+            (out / "fresh.o").write_text("new")
+            pgo.drop_stale_profile_objects(out, profdata)
+            self.assertTrue((out / "fresh.o").exists())
+            profdata.write_bytes(b"two")
+            pgo.drop_stale_profile_objects(out, profdata)
+            self.assertFalse((out / "fresh.o").exists())
+
 class TrainingWorkloadTest(unittest.TestCase):
     def test_training_covers_every_mode_and_both_variants(self) -> None:
         links = pgo.training_links(pathlib.Path("/c"))
