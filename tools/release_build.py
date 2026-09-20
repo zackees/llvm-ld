@@ -278,6 +278,25 @@ def native_tablegen(host: Host, tblgen_dir: Path, launcher: str) -> Path:
     return (tblgen_dir / "bin").resolve()
 
 
+def drop_stale_profile_objects(build_dir: Path, profdata: Path) -> None:
+    """Discard an optimized build tree that was compiled from a different profile.
+
+    `-fprofile-use=<file>` is invisible to CMake and ninja, so a rebuilt profile does not
+    invalidate a single object. Reusing the tree then mixes objects from two profiles and ThinLTO
+    fails with `linking module flags 'ProfileSummary': IDs have conflicting values` (PR #48, the
+    aarch64-musl leg, after a retry retrained). Training is not deterministic, so any rerun that
+    reaches `merge` produces a new profile: the tree has to go with it.
+    """
+    stamp = build_dir / ".pgo-profile.sha256"
+    digest = hashlib.sha256(profdata.read_bytes()).hexdigest()
+    recorded = stamp.read_text().strip() if stamp.is_file() else None
+    if build_dir.is_dir() and recorded != digest:
+        print(f"release_build: profile changed ({recorded} -> {digest[:16]}); discarding {build_dir}", flush=True)
+        shutil.rmtree(build_dir, ignore_errors=True)
+    build_dir.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(digest + "\n")
+
+
 def pgo_build(host: Host, build_dir: Path, corpus_root: Path, launcher: str = "none") -> None:
     instr_dir = build_dir.parent / (build_dir.name + "-instr")
     tools = native_tablegen(host, build_dir.parent / (build_dir.name + "-tblgen"), launcher)
@@ -301,6 +320,7 @@ def pgo_build(host: Host, build_dir: Path, corpus_root: Path, launcher: str = "n
     print(f"training: {count} links, {len(raws)} raw profile(s)", flush=True)
     profdata = (instr_dir / "llvm-ld.profdata").resolve()
     run([*profdata_tool(host), "merge", "-o", str(profdata), *map(str, raws)])
+    drop_stale_profile_objects(build_dir, profdata)
     build(host, build_dir, toolchain, pgo_env(host, "use", profdata), launcher)
 
 

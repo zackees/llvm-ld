@@ -113,6 +113,22 @@ class PgoTest(unittest.TestCase):
         self.assertIn("-DCMAKE_AR=llvm-lib", toolchain)
         self.assertEqual(release_build.pgo_env(host, "use", Path("p"))["LDFLAGS"], "")
 
+    def test_a_changed_profile_discards_the_optimized_build_tree(self):
+        """-fprofile-use is invisible to ninja: mixing two profiles breaks the ThinLTO link."""
+        with tempfile.TemporaryDirectory() as tmp:
+            build, profdata = Path(tmp) / "build-release", Path(tmp) / "llvm-ld.profdata"
+            build.mkdir()
+            (build / "stale.o").write_text("old")
+            profdata.write_bytes(b"profile-one")
+            release_build.drop_stale_profile_objects(build, profdata)
+            self.assertFalse((build / "stale.o").exists(), "a tree with no stamp is discarded")
+            (build / "fresh.o").write_text("new")
+            release_build.drop_stale_profile_objects(build, profdata)
+            self.assertTrue((build / "fresh.o").exists(), "the same profile keeps the tree")
+            profdata.write_bytes(b"profile-two")
+            release_build.drop_stale_profile_objects(build, profdata)
+            self.assertFalse((build / "fresh.o").exists(), "a new profile discards the tree")
+
     def test_pgo_builds_use_an_uninstrumented_native_tablegen(self):
         """#58: instrumented tablegen stalled the aarch64 leg; both PGO builds get a plain one."""
         host = release_build.HOSTS["x86_64-apple-darwin"]
@@ -121,7 +137,8 @@ class PgoTest(unittest.TestCase):
         def fake_run(command, **kwargs):
             commands.append(command)
             envs.append(kwargs.get("env"))
-            if "merge" in command:
+            if "merge" in command:  # llvm-profdata merge -o <profdata> <raws...>
+                Path(command[command.index("-o") + 1]).write_bytes(b"merged-profile")
                 return
         with tempfile.TemporaryDirectory() as tmp, \
                 mock.patch.object(release_build, "run", side_effect=fake_run), \
