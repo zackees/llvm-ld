@@ -34,156 +34,34 @@ jobs:
           unset MIMALLOC_DHAT MIMALLOC_DHAT_DUMP_AT_EXIT MIMALLOC_PROF_ACTIVE MI_PPROF
           cmake -S . -B build-timing -DLLVM_LD_ENABLE_PPROF=OFF -DLLVM_LD_ENABLE_DHAT=OFF
           ! grep -E 'LLVM_LD_ENABLE_(PPROF|DHAT):BOOL=ON' build-timing/CMakeCache.txt
+  # Every building job below is the ci-job template over a job in tools/ci_jobs.py (#55, #57); the
+  # YAML only installs what needs an action, calls the template and uploads artifacts.
   build-linux:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       actions: write
     env:
-      SCCACHE_GHA_ENABLED: "true"
+      # Must equal BASELINE_REF in .github/workflows/link-benchmark.yml. link-benchmark
+      # verifies the recorded value and falls back to building in-job on any mismatch.
+      BASELINE_REF: f9cdd65cbfb5f64654ce428524a8126652bed8a7
     steps:
       - uses: actions/checkout@v4
         with:
           # payload_reproducer rebuilds an upstream stand-in from the pre-strip
           # commit, which a shallow clone does not contain.
           fetch-depth: 0
-      - uses: mozilla-actions/sccache-action@v0.0.11
-      - name: Install zccache (pinned)
-        run: |
-          # Pinned because snapshot/replay first shipped in 1.14.0 (zackees/zccache#1596).
-          # pipx avoids PEP 668 on the image's system Python and does not change the Python
-          # CMake finds.
-          pipx install zccache==1.14.0
-          # Hosted runners already have PIPX_BIN_DIR on PATH; containers (act, self-hosted)
-          # may not, so export it for later steps explicitly.
-          bin_dir="$(pipx environment --value PIPX_BIN_DIR)"
-          echo "$bin_dir" >> "$GITHUB_PATH"
-          "$bin_dir/zccache" --version
-      - name: ci_build.py tests
-        run: python -m unittest discover -s tests -p 'test_ci_build.py' -v
-      - name: Build-tree cache key
-        id: buildtree-key
-        run: python tools/ci_build.py key --launcher sccache --github-output
-      - name: Restore build tree
-        id: buildtree-restore
-        uses: actions/cache/restore@v4
+      # ci-linux: the build-tree cache (#21; restored by prefix, content-verified replay), the build
+      # under the shared linux-clang-release zccache, the closure audit, the export allowlist and
+      # ctest. Its post phase (push to main only) builds link-benchmark's baseline linker after
+      # the build tree is saved, because it leaves build/ holding BASELINE_REF objects.
+      - uses: ./.github/actions/ci-job
         with:
-          path: build
-          # Split per issue #21: primary hashes everything that affects the build (payload
-          # closure, payload-prune.json, CMakeLists.txt, exports.map, cmake/, src/, include/,
-          # tools/, tests/, compiler/cmake/ninja identity, launcher), so an exact hit is a
-          # no-op build. restore-keys is the prefix over payload closure + payload-prune.json
-          # + compiler identity, so a PR that edits first-party code restores main's tree and
-          # rebuilds only what changed. Correctness comes from the content-verified replay
-          # below, not from the key.
-          key: ${{ steps.buildtree-key.outputs.primary }}
-          restore-keys: ${{ steps.buildtree-key.outputs.restore-prefix }}
-      - name: Replay content-verified source mtimes
-        run: python tools/ci_build.py replay --import-upstream
-      # Flags (LLVM_APPEND_VC_REV=OFF, clang, Release, the cmake trace used by the closure
-      # audit) now live in tools/ci_build.py configure_command, see its comment; CI keeps
-      # sccache on the GitHub Actions backend for compile caching, and switching to zccache
-      # is changing this one flag.
-      - name: Configure and build
-        run: python tools/ci_build.py build --launcher sccache
-      - name: sccache stats
-        if: always()
-        continue-on-error: true
-        run: sccache --show-stats
-      - name: Audit mechanically derived build closure
-        run: |
-          ninja -C build -t inputs llvm_ld > build-inputs.txt
-          ninja -C build -t deps > build-deps.txt
-          python tools/audit_build.py --source . --build build --ninja-inputs build-inputs.txt --ninja-deps build-deps.txt --cmake-trace cmake-trace.jsonl --expected-llvm-closure provenance/llvm-source-closure.json --output source-closure.json
+          job: ci-linux
       - uses: actions/upload-artifact@v4
         with:
           name: linux-source-closure
           path: source-closure.json
-      - name: Export allowlist
-        run: |
-          nm -D --defined-only --extern-only build/libllvm_ld.so | awk '{print $3}' | sort > actual-exports.txt
-          printf 'llvm_ld_abi_version\nllvm_ld_allocator_get_info\nllvm_ld_invoke\nllvm_ld_profiler_start\nllvm_ld_profiler_stop\n' > expected-exports.txt
-          diff -u expected-exports.txt actual-exports.txt
-      - run: ctest --test-dir build --output-on-failure
-      # ORDERING is a correctness requirement: the baseline step below rebuilds llvm-ld-direct
-      # from BASELINE_REF payload files and then restores the HEAD files without rebuilding, so
-      # after it build/ holds objects compiled from baseline content. Saving the tree after that
-      # step together with a manifest recorded before it would let replay stamp HEAD content with
-      # an old mtime next to baseline objects and ship a wrong binary. Snapshot+save must
-      # therefore happen while build/ matches HEAD, i.e. here. The 10 GB repo cache budget also
-      # already holds ~2 GB of sccache, which is why only main saves.
-      - name: Snapshot source mtimes (main only)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: python tools/ci_build.py snapshot
-      - name: Save build tree (main only)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.buildtree-restore.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: build
-          key: ${{ steps.buildtree-key.outputs.primary }}
-      # Keeps one build tree (~GBs) so it cannot evict the warm sccache from the 10 GB budget.
-      - name: Prune superseded build-tree caches (main only)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.buildtree-restore.outputs.cache-hit != 'true'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PRIMARY: ${{ steps.buildtree-key.outputs.primary }}
-        run: |
-          set -euo pipefail
-          gh cache list --repo "$GITHUB_REPOSITORY" --key llvm-ld-buildtree- --ref refs/heads/main --limit 100 --json id,key --jq '.[] | select(.key != env.PRIMARY) | .id' \
-            | while read -r id; do
-                gh cache delete --repo "$GITHUB_REPOSITORY" "$id"
-              done
-      - name: build the link-benchmark baseline linker (main only)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        env:
-          # Must equal BASELINE_REF in .github/workflows/link-benchmark.yml. link-benchmark
-          # verifies the recorded value and falls back to building in-job on any mismatch.
-          BASELINE_REF: f9cdd65cbfb5f64654ce428524a8126652bed8a7
-        run: |
-          set -euo pipefail
-          # Mirrors link-benchmark.yml's baseline build: the link-speed files from
-          # provenance/payload-prune.json checked out at BASELINE_REF, then an incremental
-          # rebuild. The FILES derivation must stay identical to link-benchmark's.
-          OUT="$RUNNER_TEMP/bench-bins"
-          mkdir -p "$OUT"
-          # Copy the candidate before any payload file changes.
-          cp build/llvm-ld-direct "$OUT/candidate"
-          FILES=$(python3 -c "
-          import json
-          d = json.load(open('provenance/payload-prune.json'))
-          print(' '.join('llvm-project/' + e['path'] for e in d['patched'] if 'link-speed' in e['reason']))
-          ")
-          test -n "$FILES"
-          echo "baseline files: $FILES"
-          read -r -a FILE_LIST <<< "$FILES"
-          git checkout "$BASELINE_REF" -- "${FILE_LIST[@]}"
-          cmake --build build --target llvm-ld-direct
-          cp build/llvm-ld-direct "$OUT/baseline"
-          # Restore the worktree. Deliberately no third rebuild: the candidate was copied
-          # first and nothing later reads the build tree.
-          git checkout HEAD -- "${FILE_LIST[@]}"
-          if cmp -s "$OUT/candidate" "$OUT/baseline"; then
-            echo "::error::baseline and candidate are the same binary; the payload has no link-speed delta"
-            exit 1
-          fi
-          export OUT
-          export BENCH_SOURCE_SHA="$GITHUB_SHA"
-          export BENCH_BASELINE_REF="$BASELINE_REF"
-          export BENCH_FILES="$FILES"
-          BENCH_COMPILER="$(clang --version | head -1)"
-          export BENCH_COMPILER
-          export BENCH_RUN_ID="$GITHUB_RUN_ID"
-          python3 -c "
-          import json, os
-          json.dump({
-              'source_sha': os.environ['BENCH_SOURCE_SHA'],
-              'baseline_ref': os.environ['BENCH_BASELINE_REF'],
-              'files': os.environ['BENCH_FILES'].split(),
-              'compiler': os.environ['BENCH_COMPILER'],
-              'run_id': os.environ['BENCH_RUN_ID'],
-          }, open(os.path.join(os.environ['OUT'], 'bench-bins.json'), 'w'), sort_keys=True)
-          "
       # Consumed by link-benchmark.yml, which looks the artifact up by this exact name for github.sha.
       - uses: actions/upload-artifact@v4
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -194,8 +72,10 @@ jobs:
           retention-days: 90
   build-linux-cross:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write
     env:
-      SCCACHE_GHA_ENABLED: "true"
       # Pinned by exact apt.llvm.org snapshot version+revision, the same package identity
       # reld's own CI validates (reld's ci.yml CLANG_PACKAGE_VERSION) -- reusing an
       # already-proven pin instead of picking a fresh, untested one. `apt-get install
@@ -223,159 +103,18 @@ jobs:
       LLVM_LD_XWIN_CRT_VERSION: "14.44.17.14"
     steps:
       - uses: actions/checkout@v4
-      # LLVM_LD_XWIN_ROOT is set here rather than in the job env because it must live OUTSIDE the
-      # checkout and only $RUNNER_TEMP gives that; the runner context is not available to a
-      # job-level env block. The splat is a toolchain sysroot, exactly like the MSVC install the
-      # native Windows job compiles against, and that one sits outside the source tree so the
-      # closure audit never sees its headers as build source reads. Keeping it inside the workspace
-      # would instead require exempting a directory of headers, which would blunt the audit.
-      - name: Resolve toolchain sysroot location
-        run: echo "LLVM_LD_XWIN_ROOT=$RUNNER_TEMP/xwin-splat" >> "$GITHUB_ENV"
-      - uses: mozilla-actions/sccache-action@v0.0.11
-      - name: Install pinned clang/lld
-        run: |
-          set -euo pipefail
-          # Same GPG key / repo-add recipe reld's ci.yml uses, with the key's SHA-256 checked
-          # before it is trusted: an apt.llvm.org MITM or key rotation fails this step loudly
-          # instead of silently trusting a different signer.
-          curl -fsSL -o "${RUNNER_TEMP}/llvm-snapshot.gpg.key" https://apt.llvm.org/llvm-snapshot.gpg.key
-          echo '8b2a587ffd672c4687e7581dad4b2f6c1bb2ad6b480cd9771ba2ff48e0b8c75d  '"${RUNNER_TEMP}"'/llvm-snapshot.gpg.key' | sha256sum --check
-          gpg --dearmor < "${RUNNER_TEMP}/llvm-snapshot.gpg.key" > "${RUNNER_TEMP}/llvm-snapshot.gpg"
-          sudo install -m 644 "${RUNNER_TEMP}/llvm-snapshot.gpg" /usr/share/keyrings/llvm-snapshot.gpg
-          echo "deb [signed-by=/usr/share/keyrings/llvm-snapshot.gpg] https://apt.llvm.org/noble/ ${LLVM_LD_CLANG_APT_SUITE} main" \
-            | sudo tee "/etc/apt/sources.list.d/llvm-${LLVM_LD_CLANG_APT_PACKAGE_SERIES}.list"
-          sudo apt-get update
-          # Exact version pin. Package layout on apt.llvm.org (verified against each .deb's file
-          # list, not assumed): clang-cl-N ships in the base clang-N package (pulled in
-          # transitively as clang-tools-N's dependency, which is why clang-cl worked even before
-          # this fix); llvm-lib-N/llvm-rc-N/llvm-nm-N ship in llvm-N; lld-link-N ships in the
-          # separate lld-N package, which nothing else here depends on -- omitting it left
-          # /usr/local/bin/lld-link a dangling symlink and every cross try-compile failed at the
-          # link step with a bewildering "no such file or directory".
-          sudo apt-get install -y \
-            "clang-tools-${LLVM_LD_CLANG_APT_PACKAGE_SERIES}=${LLVM_LD_CLANG_APT_VERSION}" \
-            "llvm-${LLVM_LD_CLANG_APT_PACKAGE_SERIES}=${LLVM_LD_CLANG_APT_VERSION}" \
-            "lld-${LLVM_LD_CLANG_APT_PACKAGE_SERIES}=${LLVM_LD_CLANG_APT_VERSION}"
-          sudo ln -sf "/usr/bin/clang-cl-${LLVM_LD_CLANG_APT_PACKAGE_SERIES}" /usr/local/bin/clang-cl
-          sudo ln -sf "/usr/bin/lld-link-${LLVM_LD_CLANG_APT_PACKAGE_SERIES}" /usr/local/bin/lld-link
-          sudo ln -sf "/usr/bin/llvm-lib-${LLVM_LD_CLANG_APT_PACKAGE_SERIES}" /usr/local/bin/llvm-lib
-          sudo ln -sf "/usr/bin/llvm-rc-${LLVM_LD_CLANG_APT_PACKAGE_SERIES}" /usr/local/bin/llvm-rc
-          sudo ln -sf "/usr/bin/llvm-nm-${LLVM_LD_CLANG_APT_PACKAGE_SERIES}" /usr/local/bin/llvm-nm
-          clang-cl --version
-          clang-cl --version | grep -q "${LLVM_LD_CLANG_VERSION}"
-      - name: Cache xwin splat
-        id: xwin-cache
-        uses: actions/cache@v4
+      # ci-linux-cross: installs the pinned clang-cl (key SHA-256 checked), provisions the xwin
+      # splat (cached by its exact identity; the splat lives in $RUNNER_TEMP, outside the checkout,
+      # so the closure audit never sees its headers as build source reads), builds native tablegen
+      # and the cross tree under the linux-clangcl-cross zccache, audits the closure, checks the
+      # import library's exports and stages the test binaries.
+      - uses: ./.github/actions/ci-job
         with:
-          path: ${{ env.LLVM_LD_XWIN_ROOT }}
-          # The -dbglibs suffix is part of the splat's identity, not decoration: a splat provisioned
-          # without --include-debug-libs is missing libcmtd/msvcrtd/ucrtd entirely. Bumping the key
-          # is what forces a reprovision -- this step has no restore-keys, so an exact-key change
-          # is a guaranteed cache miss rather than a fuzzy fallback onto the old contents.
-          key: xwin-${{ env.LLVM_LD_XWIN_VERSION }}-manifest${{ env.LLVM_LD_XWIN_MANIFEST_SHA256 }}-sdk${{ env.LLVM_LD_XWIN_SDK_VERSION }}-crt${{ env.LLVM_LD_XWIN_CRT_VERSION }}-dbglibs
-      - name: Provision xwin splat
-        if: steps.xwin-cache.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          cargo install xwin --version "${LLVM_LD_XWIN_VERSION}" --locked
-          echo "${LLVM_LD_XWIN_MANIFEST_SHA256}  provenance/vs-channel-manifest.json" | sha256sum --check
-          # --manifest: use the committed manifest snapshot instead of xwin's default live
-          # fetch from https://aka.ms/vs/17/release/channel, so the SDK/CRT catalog this job
-          # resolves --sdk-version/--crt-version against is pinned, not floating. See
-          # PROVENANCE.md for the fetch date/procedure.
-          #
-          # --include-debug-libs: a default splat drops every crt/ucrt .lib whose stem ends in `d`
-          # (libcmtd, msvcrtd, ucrtd, vcruntimed, ...). CMake's compiler-check and ABI-detection
-          # try-compiles default to the Debug configuration, so without these the very first
-          # try-compile dies on `could not open 'msvcrtd.lib'`. WinMsvcCross.cmake also pins the
-          # try-compiles to Release and to the static CRT, so this flag is belt-and-braces -- but it
-          # is cheap (this step only runs on a cache miss) and it removes an entire class of
-          # confusing Debug-only link failures for anyone configuring a Debug cross build locally.
-          xwin --accept-license \
-            --manifest provenance/vs-channel-manifest.json \
-            --sdk-version "${LLVM_LD_XWIN_SDK_VERSION}" \
-            --crt-version "${LLVM_LD_XWIN_CRT_VERSION}" \
-            splat --include-debug-libs --output "${LLVM_LD_XWIN_ROOT}"
-      - name: Stage 1 - native llvm-tblgen / llvm-min-tblgen
-        run: |
-          # The pruned payload omits llvm/examples and llvm/benchmarks, and the
-          # standalone llvm configure does not inherit the root CMakeLists cache
-          # settings, so every LLVM_INCLUDE_* guard must be repeated here.
-          cmake -S llvm-project/llvm -B build-tblgen -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_APPEND_VC_REV=OFF \
-            -DLLVM_TARGETS_TO_BUILD=X86 \
-            -DLLVM_ENABLE_PROJECTS="" \
-            -DLLVM_INCLUDE_TESTS=OFF \
-            -DLLVM_INCLUDE_EXAMPLES=OFF \
-            -DLLVM_INCLUDE_BENCHMARKS=OFF \
-            -DLLVM_BUILD_TOOLS=OFF \
-            -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF \
-            -DLLVM_ENABLE_LIBXML2=OFF -DLLVM_ENABLE_TERMINFO=OFF \
-            -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-          cmake --build build-tblgen --target llvm-tblgen llvm-min-tblgen
-      - run: mkdir -p build-cross/.cmake/api/v1/query && touch build-cross/.cmake/api/v1/query/codemodel-v2
-      - name: Stage 2 - cross configure
-        run: |
-          cmake -S . -B build-cross -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DLLVM_APPEND_VC_REV=OFF \
-            -DCMAKE_TOOLCHAIN_FILE=cmake/WinMsvcCross.cmake \
-            -DLLVM_NATIVE_TOOL_DIR="${{ github.workspace }}/build-tblgen/bin" \
-            -DLLVM_DISABLE_ASSEMBLY_FILES=ON \
-            \
-            --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace-cross.jsonl
-      - run: cmake --build build-cross --target llvm_ld abi_smoke abi_contract abi_state_test allocator-probe llvm-ld-runner llvm-ld-direct
-      - name: sccache stats
-        if: always()
-        continue-on-error: true
-        run: sccache --show-stats
-      - name: Audit mechanically derived build closure (cross)
-        run: |
-          ninja -C build-cross -t inputs llvm_ld > build-cross-inputs.txt
-          ninja -C build-cross -t deps > build-cross-deps.txt
-          python tools/audit_build.py --source . --build build-cross --ninja-inputs build-cross-inputs.txt --ninja-deps build-cross-deps.txt --cmake-trace cmake-trace-cross.jsonl --expected-llvm-closure provenance/llvm-source-closure.json --native-tool-dir build-tblgen/bin --output source-closure-linux-cross.json
+          job: ci-linux-cross
       - uses: actions/upload-artifact@v4
         with:
           name: linux-cross-source-closure
           path: source-closure-linux-cross.json
-      - name: Export allowlist (llvm-nm on the import library)
-        run: |
-          # llvm-nm against the PE DLL's own symbol table is unreliable (PE export tables are not
-          # a classic symbol table); the import library llvm-lib emits alongside llvm_ld.dll does
-          # carry a symbol table listing exactly the exported names (with __imp_ twins), so that is
-          # the cross equivalent of the Windows job's `dumpbin /exports`.
-          #
-          # Every COFF import library also defines three linker-generated boilerplate symbols that
-          # are NOT exports of the DLL and must be filtered out; verified against a real
-          # llvm_ld.lib archive symbol table, whose 13 entries are the 5 exports, their 5 __imp_
-          # twins, and exactly these three:
-          #   __IMPORT_DESCRIPTOR_llvm_ld, __NULL_IMPORT_DESCRIPTOR, \x7fllvm_ld_NULL_THUNK_DATA
-          # The thunk name carries a literal leading 0x7f byte, so it is matched end-anchored
-          # rather than by exact name. The filtering is by boilerplate SHAPE, not by an
-          # `^llvm_ld_` prefix allowlist, so an accidental non-llvm_ld export (e.g. a leaked
-          # mi_malloc) still trips the diff below.
-          #
-          # The awk takes the LAST field guarded by a single-letter nm type code in the
-          # second-to-last field, so it is correct whether llvm-nm emits the 3-column
-          # "<address> <type> <name>" form or the 2-column "<type> <name>" form for short-import
-          # members, and it skips the "archive(member):" header and blank lines (NF<2).
-          llvm-nm --defined-only --extern-only build-cross/llvm_ld.lib \
-            | awk 'NF>=2 && $(NF-1) ~ /^[A-Za-z]$/ {print $NF}' \
-            | sed 's/^__imp_//' \
-            | grep -v -E '^__(IMPORT_DESCRIPTOR_|NULL_IMPORT_DESCRIPTOR$)' \
-            | grep -v -E '_NULL_THUNK_DATA$' \
-            | sort -u > actual-exports.txt
-          printf 'llvm_ld_abi_version\nllvm_ld_allocator_get_info\nllvm_ld_invoke\nllvm_ld_profiler_start\nllvm_ld_profiler_stop\n' > expected-exports.txt
-          diff -u expected-exports.txt actual-exports.txt
-      - name: Stage test artifacts
-        run: |
-          mkdir -p stage
-          cp build-cross/llvm_ld.dll stage/
-          cp build-cross/abi_smoke.exe build-cross/abi_contract.exe build-cross/abi_state_test.exe build-cross/allocator-probe.exe stage/
-          # windows_manifest_merge.ps1 drives a real link through the wrapper, so the runner has
-          # to be staged too, not just the ABI test binaries.
-          cp build-cross/llvm-ld-runner.exe stage/
       - uses: actions/upload-artifact@v4
         with:
           name: linux-cross-stage
@@ -405,8 +144,9 @@ jobs:
           ./tests/windows_manifest_merge.ps1 -BuildDir ./stage
   build-windows:
     runs-on: windows-2025
-    env:
-      SCCACHE_GHA_ENABLED: "true"
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -414,35 +154,11 @@ jobs:
           # commit, which a shallow clone does not contain.
           fetch-depth: 0
       - uses: ilammy/msvc-dev-cmd@v1
-      - uses: mozilla-actions/sccache-action@v0.0.11
-      - shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $true
-          New-Item -ItemType Directory -Force build/.cmake/api/v1/query | Out-Null
-          New-Item -ItemType File -Force build/.cmake/api/v1/query/codemodel-v2 | Out-Null
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=OFF -DLLVM_LD_ENABLE_DHAT=OFF -DLLVM_APPEND_VC_REV=OFF -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache --trace-expand --trace-format=json-v1 --trace-redirect=cmake-trace.jsonl
-          cmake --build build --target llvm_ld abi_smoke abi_contract abi_state_test allocator-probe llvm-ld-runner llvm-ld-direct
-          ctest --test-dir build --output-on-failure
-          dumpbin /nologo /exports build/llvm_ld.dll | Select-String 'llvm_ld_(abi_version|allocator_get_info|invoke|profiler_start|profiler_stop)' | ForEach-Object { if ($_ -match 'llvm_ld_[A-Za-z_]+') { $Matches[0] } } | Sort-Object -Unique | Set-Content actual-exports.txt
-          @('llvm_ld_abi_version','llvm_ld_allocator_get_info','llvm_ld_invoke','llvm_ld_profiler_start','llvm_ld_profiler_stop') | Sort-Object | Set-Content expected-exports.txt
-          if (Compare-Object (Get-Content expected-exports.txt) (Get-Content actual-exports.txt)) { throw 'C ABI export allowlist differs' }
-          ninja -C build -t inputs llvm_ld | Set-Content build-inputs.txt
-          ninja -C build -t deps | Set-Content build-deps.txt
-          python tools/audit_build.py --source . --build build --ninja-inputs build-inputs.txt --ninja-deps build-deps.txt --cmake-trace cmake-trace.jsonl --expected-llvm-closure provenance/llvm-source-closure.json --output source-closure.json
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=ON -DLLVM_LD_ENABLE_DHAT=OFF -DLLVM_APPEND_VC_REV=OFF -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-          cmake --build build --target llvm_ld allocator-probe
-          ./build/allocator-probe.exe mimalloc-pprof
-          if($LASTEXITCODE){throw 'sampled profiler diagnostic activation failed'}
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_LD_ENABLE_PPROF=OFF -DLLVM_LD_ENABLE_DHAT=ON -DLLVM_APPEND_VC_REV=OFF -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-          cmake --build build --target llvm_ld allocator-probe
-          ./build/allocator-probe.exe mimalloc-dhat
-          if($LASTEXITCODE){throw 'DHAT diagnostic activation failed'}
-      - name: sccache stats
-        if: always()
-        shell: pwsh
-        run: sccache --show-stats
-        continue-on-error: true
+      # ci-windows: MSVC build under the shared windows-msvc-release zccache, ctest, dumpbin export
+      # allowlist, closure audit, then the PPROF and DHAT diagnostic allocators.
+      - uses: ./.github/actions/ci-job
+        with:
+          job: ci-windows
       - uses: actions/upload-artifact@v4
         with:
           name: windows-source-closure

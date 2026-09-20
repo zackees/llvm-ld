@@ -8,6 +8,26 @@ if(MSVC)
   # every allocation inside this DLL. No allocated object crosses the C ABI.
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
+# CMake's Ninja rule for MSVC-style compilers (cl, clang-cl) passes /Fd<target>.pdb to every
+# compile, and zccache, CI's compile cache (#55), will not cache a compile that names a PDB side
+# output: every Windows and cross compile was a cache miss by construction. Without /Zi (a Release
+# build, LLVM_ENABLE_PDB off) the compiler writes no PDB, so /Fd changes nothing in any object and
+# is dropped. With /Zi the rule is left alone.
+# LLVM turns precompiled headers off when the compiler launcher is sccache or ccache
+# (HandleLLVMOptions.cmake), which CI relied on while it used sccache. zccache is not on that list,
+# so moving CI to zccache (#55) silently turned PCH on, and every cl/clang-cl PCH compile (/Yu /Fp)
+# is non-cacheable in zccache (PR #60: 0 hits, 1493 non-cacheable). Same rule for zccache.
+if(CMAKE_CXX_COMPILER_LAUNCHER MATCHES "zccache" AND NOT DEFINED CMAKE_DISABLE_PRECOMPILE_HEADERS)
+  set(CMAKE_DISABLE_PRECOMPILE_HEADERS ON)
+endif()
+if(MSVC AND CMAKE_BUILD_TYPE MATCHES "^(Release|MinSizeRel)$" AND NOT LLVM_ENABLE_PDB)
+  string(TOUPPER "${CMAKE_BUILD_TYPE}" _llvm_ld_config)
+  foreach(lang C CXX)
+    if(NOT "${CMAKE_${lang}_FLAGS} ${CMAKE_${lang}_FLAGS_${_llvm_ld_config}}" MATCHES "[/-]Zi")
+      string(REPLACE " /Fd<TARGET_COMPILE_PDB>" "" CMAKE_${lang}_COMPILE_OBJECT "${CMAKE_${lang}_COMPILE_OBJECT}")
+    endif()
+  endforeach()
+endif()
 
 option(LLVM_LD_ENABLE_PPROF "Compile mimalloc sampled pprof hooks" OFF)
 option(LLVM_LD_ENABLE_DHAT "Compile mimalloc exact DHAT support" OFF)
