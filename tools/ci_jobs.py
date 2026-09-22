@@ -49,7 +49,7 @@ import bench_ci  # noqa: E402
 import ci_build  # noqa: E402
 
 # The zccache release the template installs (`zackees/zccache@<tag>` with `zccache-version`).
-ZCCACHE_VERSION = "1.14.3"
+ZCCACHE_VERSION = "1.14.5"
 # zccache's client treats a compile that has not answered within 180 s (queue wait included) as a
 # wedged daemon and fails it with exit code 113. The largest PGO-instrumented LLVM TUs
 # (SelectionDAGBuilder.cpp, PassBuilder.cpp) take longer on a 4-core runner, which failed
@@ -344,22 +344,11 @@ def audit_closure(build: str, trace: str, output: str, extra: list[str] | None =
 
 
 def launcher_or_none(compiler: str | None = None) -> str:
-    """The compiler launcher for this job: zccache when it is installed and, for `compiler`, works.
-
-    zccache 1.14.3 mangles /showIncludes on Windows, so every cl/clang-cl compile fails on the
-    first edge (zackees/zccache#1603): ci-windows spent 69 min building three times uncached after
-    the bypass retry. One tiny compile through zccache decides it up front, so a broken launcher
-    costs a second instead of a failed build, and the probe starts passing by itself once the bug
-    is fixed upstream. Bypassing also re-enables precompiled headers (the root CMakeLists.txt keys
-    its PCH rule on the launcher), which is the right trade when nothing is cached anyway."""
-    # ZCCACHE_DISABLE is deliberately NOT consulted here: the bypass retry must keep the launcher on
-    # the compile command line, or every object is invalidated and ninja rebuilds from scratch
-    # (main run 35477913994: the retry re-ran 1914 of 1916 edges, 72 min for build-linux). Only
-    # NO_LAUNCHER, the second-stage fallback, reconfigures without it.
-    if not shutil.which("zccache") or os.environ.get("LLVM_LD_NO_LAUNCHER") == "1":
+    """Select zccache when installed, failing closed if its compiler probe is broken."""
+    if not shutil.which("zccache"):
         return "none"
     if compiler and not zccache_compiles(compiler):
-        return "none"
+        raise SystemExit(f"zccache cannot compile through {compiler}")
     return "zccache"
 
 
@@ -377,9 +366,7 @@ def zccache_compiles(compiler: str) -> bool:
         probe = subprocess.run(command, capture_output=True, text=True, cwd=tmp)
     if probe.returncode == 0:
         return True
-    log(f"::warning::zccache cannot compile through {compiler} ({probe.stderr.strip()[:200]}); "
-        "building without a compiler launcher (zackees/zccache#1603)")
-    summary(f"- zccache: unusable with {compiler}; this job builds uncached (zackees/zccache#1603)")
+    log(f"::error::zccache cannot compile through {compiler}: {probe.stderr.strip()[:200]}")
     return False
 
 
@@ -388,8 +375,7 @@ def cmake_build(build: str, targets: list[str]) -> None:
 
 
 def msvc_build(build: str, cmake_args: list[str], targets: list[str], trace: str | None = None) -> None:
-    """Configure + build with MSVC cl under zccache. zccache's cl.exe support is documented as
-    partial; a failure is retried with the cache bypassed (call_with_bypass_retry)."""
+    """Configure and build with MSVC cl under zccache."""
     ci_build.ensure_codemodel_query(ROOT / build)
 
     def attempt(launcher: str) -> None:
@@ -737,8 +723,6 @@ def release_build_in_alpine(common: list[str]) -> None:
         # The container's daemon logs to the checkout, so a failure shows zccache's side of it.
         env = ["-e", "ZCCACHE_CACHE_DIR=/zccache-cache", "-e", "ZCCACHE_LOG_FILE=/src/zccache-daemon.log",
                *(f"-e{key}={value}" for key, value in ZCCACHE_ENV.items()),
-               # Set by call_with_bypass_retry on the retry.
-               *(["-e", "ZCCACHE_DISABLE=1"] if os.environ.get("ZCCACHE_DISABLE") == "1" else []),
                "-e", "PATH=/opt/zccache:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"]
         launcher = "zccache"
     script = ("apk add --no-cache build-base cmake ninja python3 linux-headers git clang lld llvm compiler-rt && "
@@ -818,45 +802,6 @@ def session_end(session: str) -> dict:
         return {"status": "error", "raw": text[-400:]}
 
 
-def call_with_bypass_retry(job: Job, body: Callable[[argparse.Namespace], None], args: argparse.Namespace) -> None:
-    """Run a compiling job's body, retrying a zccache fault without losing the build.
-
-    zccache fails compiles with no compiler diagnostic (exit 113 from a SIGTERM'd compile, a lost
-    daemon under load, /showIncludes mangled on Windows: zackees/zccache#1603), and a cache fault
-    must cost time, not a red build. Two stages, in this order for a reason:
-
-    1. `ZCCACHE_DISABLE=1` keeps `zccache` on the compile command line and only bypasses it at
-       run time, so ninja's commands are unchanged and the build RESUMES.
-    2. Only if that fails too, drop the launcher entirely, which changes every command line and
-       costs a full rebuild.
-
-    Doing 2 first is what made build-linux take 72 min on main (run 35477913994). A real compile
-    error fails every stage. Each fallback warns, is recorded, and makes the job cold."""
-    stages = [
-        ("ZCCACHE_DISABLE", "bypassing zccache at run time (the build resumes)"),
-        ("LLVM_LD_NO_LAUNCHER", "without a compiler launcher (this rebuilds from scratch)"),
-    ]
-    try:
-        body(args)
-        return
-    except (subprocess.CalledProcessError, SystemExit):
-        if job.cache_group is None:
-            raise
-    for index, (variable, description) in enumerate(stages):
-        if os.environ.get(variable) == "1":
-            continue
-        log(f"::warning::{job.name} failed under zccache; retrying {description}")
-        summary(f"- zccache: {job.name} failed; retried {description}")
-        os.environ[variable] = "1"
-        args.bypassed = True
-        try:
-            body(args)
-            return
-        except (subprocess.CalledProcessError, SystemExit):
-            if index == len(stages) - 1:
-                raise
-
-
 # A job is warm when nearly every compile came from the cache. Not "zero misses": a GitHub cache
 # entry is immutable, so whatever a key was saved with is what later runs get, and a job that
 # compiles anything new (bench-plain rebuilds six payload files at BASELINE_REF) keeps missing on
@@ -932,7 +877,7 @@ def run_body(job: Job, body: Callable[[argparse.Namespace], None], args: argpars
         os.environ["ZCCACHE_SESSION_ID"] = session
     status, stats = 0, None
     try:
-        call_with_bypass_retry(job, body, args)
+        body(args)
     except subprocess.CalledProcessError as exc:
         log(f"::error::{job.name}: command failed with exit code {exc.returncode}")
         status = 1
@@ -957,14 +902,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         log(f"{job.name}: exact-input artifact cache hit; nothing to do")
     else:
         status, stats = run_body(job, job.body, args)
-    # A job whose compiles ran where this session cannot see them (a container), or that fell back
-    # to bypassing zccache, is never warm.
-    warm = status == 0 and not getattr(args, "unobserved", False) and not getattr(args, "bypassed", False) and (
+    # A job whose compiles ran where this session cannot see them is never warm.
+    warm = status == 0 and not getattr(args, "unobserved", False) and (
         args.cached == "true" or not args.compiled or is_warm(stats))
     record = {"job": args.label or job.name, "seconds": round(time.time() - start, 1), "warm": warm,
               "detail": args.detail or ("built" if args.compiled else "")}
-    if getattr(args, "bypassed", False):
-        record["detail"] += " (retried with zccache bypassed)"
     if stats and args.compiled:
         record["zccache"] = {k: stats.get(k) for k in ("compilations", "hits", "misses", "non_cacheable")}
         summary(f"zccache {record['job']}: {stats.get('hits')} hits, {stats.get('misses')} misses (warm={warm})")
