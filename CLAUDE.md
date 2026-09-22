@@ -190,7 +190,7 @@ parallel; `pgo-opt` builds the candidate (patches + PGO + ThinLTO + BOLT); `cell
 (debug/release/thinlto) measuring in parallel; `measure` renders; `floors` checks the floors last.
 Every building or measuring job is the one template `.github/actions/ci-job` over a job declared in
 `tools/ci_jobs.py` (#55): `prepare` (toolchain + cache identities), the job's exact-input artifact
-cache, `zackees/zccache@1.14.3` for the job's cache group, `ci_jobs.py run` (the job under a zccache
+cache, `zackees/zccache@1.14.5` for the job's cache group, `ci_jobs.py run` (the job under a zccache
 stats session; warm = 0 misses; writes `timing-<job>.json`), then artifact save, zccache cleanup,
 prune of superseded compile-cache entries, and the timing upload. The YAML only checks out, calls
 the template and moves artifacts; job logic goes in `ci_jobs.py`, never inline bash. Caches are
@@ -241,13 +241,9 @@ on it too: `ci-linux`, `ci-linux-cross`, `ci-windows`, `correctness-coff`, `benc
 with warm-run time floors per job (`warm_max_minutes`, checked last by the template's `floor` step,
 reported but not enforced when cold). The three MSVC jobs share `windows-msvc-release`; `ci-windows`
 builds the system-baseline targets too so that one cache covers all three. cl.exe and clang-cl
-support in zccache is partial, and zccache has failed compiles with no diagnostic. Each job first
-probes zccache with one trivial compile (`zccache_compiles`), and a compiling job that still fails
-is retried in two stages, in this order: `ZCCACHE_DISABLE=1`, which keeps `zccache` on the compile
-command line and only bypasses it at run time **so ninja resumes**, and only then without a
-launcher at all, which changes every command line and rebuilds from scratch. Doing the second
-first cost build-linux 72 min on main (run 35477913994, 1914 of 1916 edges re-run). Both warn and
-make the job cold (never sccache). zccache's client also
+support in zccache is covered by a fail-closed trivial compile probe (`zccache_compiles`). A failed
+probe or build fails the job immediately: CI must never retry with `ZCCACHE_DISABLE` or silently
+drop the launcher, because that would hide a zccache regression. zccache's client also
 fails a compile that has not answered in 180 s with exit 113; `ZCCACHE_WEDGE_RECV_TIMEOUT_SECS`
 is raised to 3600 for every job, because instrumented SelectionDAGBuilder.cpp takes longer.
 release.yml (#58) runs `release-corpus` and `release-build`
@@ -405,12 +401,12 @@ same code path runs locally. Subcommands:
 Local usage:
 
 ```
-python -m venv ~/.venvs/zccache && ~/.venvs/zccache/bin/pip install zccache==1.14.0   # or: pipx/uv tool install zccache==1.14.0
+python -m venv ~/.venvs/zccache && ~/.venvs/zccache/bin/pip install zccache==1.14.5   # or: pipx/uv tool install zccache==1.14.5
 PATH=~/.venvs/zccache/bin:$PATH python tools/ci_build.py all        # launcher auto -> zccache
 python -m unittest discover -s tests -p 'test_ci_build.py' -v       # e2e test runs when zccache is on PATH
 ```
 
-`ZCCACHE="uvx --from zccache==1.14.0 zccache"` works for replay/snapshot (not as the compiler
+`ZCCACHE="uvx --from zccache==1.14.5 zccache"` works for replay/snapshot (not as the compiler
 launcher, which needs a real `zccache` on PATH).
 
 Two invariants: (a) CI's compile cache is zccache (the `ci-job` template, cache group

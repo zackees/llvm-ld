@@ -58,19 +58,14 @@ class LauncherProbeTest(unittest.TestCase):
                 mock.patch.object(ci_jobs, "zccache_compiles", return_value=True):
             self.assertEqual(ci_jobs.launcher_or_none("cl"), "zccache")
 
-    def test_a_broken_probe_builds_without_a_launcher(self):
+    def test_a_broken_probe_fails_closed(self):
         with mock.patch.object(ci_jobs.shutil, "which", return_value="/usr/bin/zccache"), \
                 mock.patch.object(ci_jobs, "zccache_compiles", return_value=False):
-            self.assertEqual(ci_jobs.launcher_or_none("cl"), "none")
+            with self.assertRaisesRegex(SystemExit, "cannot compile through cl"):
+                ci_jobs.launcher_or_none("cl")
 
-    def test_the_run_time_bypass_keeps_the_launcher_so_the_build_resumes(self):
-        """ZCCACHE_DISABLE must not change the compile command line; only NO_LAUNCHER does."""
-        with mock.patch.dict(os.environ, {"ZCCACHE_DISABLE": "1"}), \
-                mock.patch.object(ci_jobs.shutil, "which", return_value="/usr/bin/zccache"), \
-                mock.patch.object(ci_jobs, "zccache_compiles", return_value=True):
-            self.assertEqual(ci_jobs.launcher_or_none("cl"), "zccache")
-        with mock.patch.dict(os.environ, {"LLVM_LD_NO_LAUNCHER": "1"}), \
-                mock.patch.object(ci_jobs.shutil, "which", return_value="/usr/bin/zccache"):
+    def test_missing_zccache_builds_without_a_launcher(self):
+        with mock.patch.object(ci_jobs.shutil, "which", return_value=None):
             self.assertEqual(ci_jobs.launcher_or_none("cl"), "none")
 
     def test_the_probe_invokes_the_compiler_in_its_own_dialect(self):
@@ -188,47 +183,17 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertEqual(len(records), 1)
 
-    def test_the_retry_escalates_from_run_time_bypass_to_dropping_the_launcher(self):
-        stages, fails = [], [True, True, False]
-
-        def flaky(args):
-            stages.append((os.environ.get("ZCCACHE_DISABLE"), os.environ.get("LLVM_LD_NO_LAUNCHER")))
-            if fails[len(stages) - 1]:
-                raise ci_jobs.subprocess.CalledProcessError(113, ["ninja"])
-        job = ci_jobs.Job("t-escalate", flaky, cache_group="g")
-        with mock.patch.dict(os.environ, {}), mock.patch.object(ci_jobs, "session_start", return_value=None):
-            for name in ("ZCCACHE_DISABLE", "LLVM_LD_NO_LAUNCHER"):
-                os.environ.pop(name, None)
-            status, records = self.run_job(job)
-        self.assertEqual(status, 0)
-        self.assertEqual(stages, [(None, None), ("1", None), ("1", "1")])
-        self.assertFalse(records[0]["warm"])
-
-    def test_a_failure_under_zccache_is_retried_once_with_the_cache_bypassed(self):
+    def test_a_failed_build_is_not_retried_or_bypassed(self):
         calls = []
 
-        def flaky(args):
-            calls.append(os.environ.get("ZCCACHE_DISABLE"))
-            if len(calls) == 1:
-                raise ci_jobs.subprocess.CalledProcessError(113, ["ninja"])
-        job = ci_jobs.Job("t-flaky", flaky, cache_group="g")
-        with mock.patch.dict(os.environ, {}), mock.patch.object(ci_jobs, "session_start", return_value=None):
-            for name in ("ZCCACHE_DISABLE", "LLVM_LD_NO_LAUNCHER"):
-                os.environ.pop(name, None)
-            status, records = self.run_job(job)
-        self.assertEqual((status, calls), (0, [None, "1"]))
-        self.assertFalse(records[0]["warm"])
-        self.assertIn("bypassed", records[0]["detail"])
-
-    def test_a_real_error_still_fails_after_the_retry(self):
         def broken(args):
+            calls.append(1)
             raise ci_jobs.subprocess.CalledProcessError(1, ["ninja"])
         job = ci_jobs.Job("t-broken", broken, cache_group="g")
-        with mock.patch.dict(os.environ, {}), mock.patch.object(ci_jobs, "session_start", return_value=None):
-            for name in ("ZCCACHE_DISABLE", "LLVM_LD_NO_LAUNCHER"):
-                os.environ.pop(name, None)
+        with mock.patch.object(ci_jobs, "session_start", return_value=None):
             status, _ = self.run_job(job)
         self.assertEqual(status, 1)
+        self.assertEqual(calls, [1])
 
     def test_post_phase_adds_its_time_to_the_record(self):
         job = ci_jobs.Job("t-post", lambda args: None, post=lambda args: None)
