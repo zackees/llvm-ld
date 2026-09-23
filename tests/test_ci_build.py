@@ -48,8 +48,8 @@ def _isolated_env(empty_path_dir: str) -> dict[str, str]:
 
 class ConstantsTest(unittest.TestCase):
     def test_zccache_version_and_install_hint(self) -> None:
-        self.assertEqual(ci_build.ZCCACHE_VERSION, "1.14.9")
-        self.assertIn("pip install zccache==1.14.9", ci_build.INSTALL_HINT)
+        self.assertEqual(ci_build.ZCCACHE_VERSION, "1.14.10")
+        self.assertIn("pip install zccache==1.14.10", ci_build.INSTALL_HINT)
 
     def test_default_targets(self) -> None:
         self.assertEqual(
@@ -465,14 +465,14 @@ class ZccacheDiscoveryTest(unittest.TestCase):
                     ci_build.require_zccache("build")
                 message = str(ctx.exception)
                 self.assertIn("zccache", message)
-                self.assertIn("pip install zccache==1.14.9", message)
+                self.assertIn("pip install zccache==1.14.10", message)
 
     def test_find_zccache_honours_env_override(self) -> None:
         with mock.patch.dict(
-            os.environ, {"ZCCACHE": "uvx --from zccache==1.14.9 zccache"}
+            os.environ, {"ZCCACHE": "uvx --from zccache==1.14.10 zccache"}
         ):
             result = ci_build.find_zccache()
-            self.assertEqual(result, ["uvx", "--from", "zccache==1.14.9", "zccache"])
+            self.assertEqual(result, ["uvx", "--from", "zccache==1.14.10", "zccache"])
 
 
 class ResolveLauncherTest(unittest.TestCase):
