@@ -49,7 +49,7 @@ import bench_ci  # noqa: E402
 import ci_build  # noqa: E402
 
 # The zccache release the template installs (`zackees/zccache@<tag>` with `zccache-version`).
-ZCCACHE_VERSION = "1.14.5"
+ZCCACHE_VERSION = "1.14.11"
 # zccache's client treats a compile that has not answered within 180 s (queue wait included) as a
 # wedged daemon and fails it with exit code 113. The largest PGO-instrumented LLVM TUs
 # (SelectionDAGBuilder.cpp, PassBuilder.cpp) take longer on a 4-core runner, which failed

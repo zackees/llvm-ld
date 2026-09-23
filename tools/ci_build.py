@@ -50,7 +50,7 @@ Subcommands
             (CI runs the three steps separately so the cache restore/save
             and the main-only snapshot can sit between them)
 
-Local usage: install zccache in a venv (`pip install zccache==1.14.5`), then
+Local usage: install zccache in a venv (`pip install zccache==1.14.11`), then
 from the repository root run `python tools/ci_build.py all`. `--launcher`
 defaults to `auto`, which picks zccache when it is on PATH and falls back to
 an uncached build (`none`) otherwise, so the command works with or without
@@ -75,7 +75,7 @@ import sys
 import time
 from pathlib import Path
 
-ZCCACHE_VERSION = "1.14.5"
+ZCCACHE_VERSION = "1.14.11"
 
 # Identical to ci.yml build-linux's `cmake --build build --target ...` today.
 DEFAULT_TARGETS = [
@@ -125,8 +125,8 @@ PAYLOAD_KEY_PATHS = [
 ]
 
 INSTALL_HINT = (
-    "install it with `pip install zccache==1.14.5` (in a venv), "
-    "`pipx install zccache==1.14.5` or `uv tool install zccache==1.14.5`"
+    "install it with `pip install zccache==1.14.11` (in a venv), "
+    "`pipx install zccache==1.14.11` or `uv tool install zccache==1.14.11`"
 )
 
 _EDGE_LINE = re.compile(r"^\[\d+/\d+\] ")
@@ -270,7 +270,7 @@ def find_zccache() -> list[str] | None:
     """Locate a zccache invocation, as an argv prefix.
 
     `$ZCCACHE`, when set, is shell-split rather than treated as a bare path,
-    so a caller can point it at e.g. `uvx --from zccache==1.14.5 zccache`
+    so a caller can point it at e.g. `uvx --from zccache==1.14.11 zccache`
     without needing a real binary on PATH.
     """
     env = os.environ.get("ZCCACHE")
