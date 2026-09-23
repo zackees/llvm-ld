@@ -190,7 +190,7 @@ parallel; `pgo-opt` builds the candidate (patches + PGO + ThinLTO + BOLT); `cell
 (debug/release/thinlto) measuring in parallel; `measure` renders; `floors` checks the floors last.
 Every building or measuring job is the one template `.github/actions/ci-job` over a job declared in
 `tools/ci_jobs.py` (#55): `prepare` (toolchain + cache identities), the job's exact-input artifact
-cache, `zackees/zccache@1.14.10` for the job's cache group, `ci_jobs.py run` (the job under a zccache
+cache, `zackees/zccache@1.14.11` for the job's cache group, `ci_jobs.py run` (the job under a zccache
 stats session; warm = 0 misses; writes `timing-<job>.json`), then artifact save, zccache cleanup,
 prune of superseded compile-cache entries, and the timing upload. The YAML only checks out, calls
 the template and moves artifacts; job logic goes in `ci_jobs.py`, never inline bash. Caches are
@@ -401,12 +401,12 @@ same code path runs locally. Subcommands:
 Local usage:
 
 ```
-python -m venv ~/.venvs/zccache && ~/.venvs/zccache/bin/pip install zccache==1.14.10   # or: pipx/uv tool install zccache==1.14.10
+python -m venv ~/.venvs/zccache && ~/.venvs/zccache/bin/pip install zccache==1.14.11   # or: pipx/uv tool install zccache==1.14.11
 PATH=~/.venvs/zccache/bin:$PATH python tools/ci_build.py all        # launcher auto -> zccache
 python -m unittest discover -s tests -p 'test_ci_build.py' -v       # e2e test runs when zccache is on PATH
 ```
 
-`ZCCACHE="uvx --from zccache==1.14.10 zccache"` works for replay/snapshot (not as the compiler
+`ZCCACHE="uvx --from zccache==1.14.11 zccache"` works for replay/snapshot (not as the compiler
 launcher, which needs a real `zccache` on PATH).
 
 Two invariants: (a) CI's compile cache is zccache (the `ci-job` template, cache group

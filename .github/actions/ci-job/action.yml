@@ -54,7 +54,7 @@ runs:
         key: ${{ steps.prep.outputs.tree-key }}
         restore-keys: ${{ steps.prep.outputs.tree-restore }}
     - if: steps.prep.outputs.cache-group != '' && steps.skip.outputs.skip != 'true'
-      uses: zackees/zccache@1.14.10
+      uses: zackees/zccache@1.14.11
       with:
         zccache-version: ${{ steps.prep.outputs.zccache-version }}
         shared-key: ${{ steps.prep.outputs.cache-group }}
@@ -88,7 +88,7 @@ runs:
         PY: ${{ runner.os == 'Windows' && 'python' || 'python3' }}
       run: $PY tools/ci_jobs.py post "${{ inputs.job }}" ${LABEL:+--label "$LABEL"} ${{ inputs.args }}
     - if: always() && steps.prep.outputs.cache-group != '' && steps.skip.outputs.skip != 'true'
-      uses: zackees/zccache/action/cleanup@1.14.10
+      uses: zackees/zccache/action/cleanup@1.14.11
     - if: always() && steps.prep.outputs.save == 'true' && steps.skip.outputs.skip != 'true'
       shell: bash
       continue-on-error: true
