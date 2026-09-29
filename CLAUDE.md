@@ -90,7 +90,7 @@ explicit path (or `rg --no-ignore`) when you actually need to read LLVM optimize
 - Things already done (Sep 2026): parallel PDB symbol-merging analysis, parallel section-
   contribution CRCs, PROCREF pre-serialization, parallel publics collection + serialization,
   batched GSI writes, deferred parallel `.debug$S` flag scan, slice-by-8 CRC-32, cwd caching in
-  `pdbMakeAbsolute`. Result: +46% wall at default threads (`/threads:16`) on a 16-thread local
+  `pdbMakeAbsolute`, arch hoisted out of the per-relocation loops in `Chunks.cpp`. Result: +46% wall at default threads (`/threads:16`) on a 16-thread local
   machine, +17% at `/threads:1`, on 2048 objects. The hosted-runner dashboard caps at 4 threads
   (see below), so it will show a smaller figure.
 - Remaining hot spots on the large corpus (default threads), all investigated under #15 and
