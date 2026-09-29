@@ -274,7 +274,10 @@ public:
   }
   void getBaserels(std::vector<Baserel> *res);
   bool isCOMDAT() const;
-  void applyRelocation(uint8_t *off, const coff_relocation &rel) const;
+  // arch is getArch(), passed in so callers can compute it once per chunk
+  // rather than once per relocation (it goes through a virtual call).
+  void applyRelocation(uint8_t *off, const coff_relocation &rel,
+                       llvm::Triple::ArchType arch) const;
   void applyRelX64(uint8_t *off, uint16_t type, OutputSection *os, uint64_t s,
                    uint64_t p, uint64_t imageBase) const;
   void applyRelX86(uint8_t *off, uint16_t type, OutputSection *os, uint64_t s,

@@ -368,10 +368,9 @@ void SectionChunk::applyRelARM64(uint8_t *off, uint16_t type, OutputSection *os,
   }
 }
 
-static void maybeReportRelocationToDiscarded(const SectionChunk *fromChunk,
-                                             Defined *sym,
-                                             const coff_relocation &rel,
-                                             bool isMinGW) {
+LLVM_ATTRIBUTE_NOINLINE static void
+maybeReportRelocationToDiscarded(const SectionChunk *fromChunk, Defined *sym,
+                                 const coff_relocation &rel, bool isMinGW) {
   // Don't report these errors when the relocation comes from a debug info
   // section or in mingw mode. MinGW mode object files (built by GCC) can
   // have leftover sections with relocations against discarded comdat
@@ -413,6 +412,7 @@ void SectionChunk::writeTo(uint8_t *buf) const {
 
   // Apply relocations.
   size_t inputSize = getSize();
+  Triple::ArchType arch = getArch();
   for (const coff_relocation &rel : getRelocs()) {
     // Check for an invalid relocation offset. This check isn't perfect, because
     // we don't have the relocation size, which is only known after checking the
@@ -423,12 +423,12 @@ void SectionChunk::writeTo(uint8_t *buf) const {
       continue;
     }
 
-    applyRelocation(buf + rel.VirtualAddress, rel);
+    applyRelocation(buf + rel.VirtualAddress, rel, arch);
   }
 }
 
-void SectionChunk::applyRelocation(uint8_t *off,
-                                   const coff_relocation &rel) const {
+void SectionChunk::applyRelocation(uint8_t *off, const coff_relocation &rel,
+                                   Triple::ArchType arch) const {
   auto *sym = dyn_cast_or_null<Defined>(file->getSymbol(rel.SymbolTableIndex));
 
   // Get the output section of the symbol for this relocation.  The output
@@ -453,7 +453,7 @@ void SectionChunk::applyRelocation(uint8_t *off,
   // Compute the RVA of the relocation for relative relocations.
   uint64_t p = rva + rel.VirtualAddress;
   uint64_t imageBase = ctx.config.imageBase;
-  switch (getArch()) {
+  switch (arch) {
   case Triple::x86_64:
     applyRelX64(off, rel.Type, os, s, p, imageBase);
     break;
@@ -498,6 +498,7 @@ void SectionChunk::writeAndRelocateSubsection(ArrayRef<uint8_t> sec,
   size_t vaBegin = std::distance(sec.begin(), subsec.begin());
   size_t vaEnd = std::distance(sec.begin(), subsec.end());
   memcpy(buf, subsec.data(), subsec.size());
+  Triple::ArchType arch = getArch();
   for (; nextRelocIndex < relocsSize; ++nextRelocIndex) {
     const coff_relocation &rel = relocsData[nextRelocIndex];
     // Only apply relocations that apply to this subsection. These checks
@@ -507,7 +508,7 @@ void SectionChunk::writeAndRelocateSubsection(ArrayRef<uint8_t> sec,
       continue;
     if (rel.VirtualAddress + 1 >= vaEnd)
       break;
-    applyRelocation(&buf[rel.VirtualAddress - vaBegin], rel);
+    applyRelocation(&buf[rel.VirtualAddress - vaBegin], rel, arch);
   }
 }
 
@@ -562,8 +563,9 @@ static uint8_t getBaserelType(const coff_relocation &rel,
 // fixed by the loader if load-time relocation is needed.
 // Only called when base relocation is enabled.
 void SectionChunk::getBaserels(std::vector<Baserel> *res) {
+  Triple::ArchType arch = getArch();
   for (const coff_relocation &rel : getRelocs()) {
-    uint8_t ty = getBaserelType(rel, getArch());
+    uint8_t ty = getBaserelType(rel, arch);
     if (ty == IMAGE_REL_BASED_ABSOLUTE)
       continue;
     Symbol *target = file->getSymbol(rel.SymbolTableIndex);

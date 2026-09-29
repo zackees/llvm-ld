@@ -64,6 +64,14 @@
       "reason": "link-speed: ObjFile::finishDeferredFlags/flagsDeferred for the deferred .debug$S flag scan."
     },
     {
+      "path": "lld/COFF/Chunks.cpp",
+      "reason": "link-speed: relocation loops (writeTo, writeAndRelocateSubsection, getBaserels) compute the chunk's arch once instead of once per relocation (a virtual getMachineType call each), and the discarded-section diagnostic is kept out of line. Output bytes unchanged."
+    },
+    {
+      "path": "lld/COFF/Chunks.h",
+      "reason": "link-speed: SectionChunk::applyRelocation takes the precomputed arch."
+    },
+    {
       "path": "lld/COFF/Writer.cpp",
       "reason": "link-speed: runs the deferred .debug$S flag scan for all objects in parallel at the start of Writer::run, before hotPatchable is read."
     },
