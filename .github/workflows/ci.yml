@@ -14,6 +14,12 @@ concurrency:
 jobs:
   provenance:
     runs-on: ubuntu-latest
+    # contents: read is what this job already had; actions: read and pull-requests: read are only
+    # for the read-only reuse decision at the end of the job (zackees/ci.yml#162).
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
       - name: Undeclared-read negative controls
@@ -36,6 +42,34 @@ jobs:
           unset MIMALLOC_DHAT MIMALLOC_DHAT_DUMP_AT_EXIT MIMALLOC_PROF_ACTIVE MI_PPROF
           cmake -S . -B build-timing -DLLVM_LD_ENABLE_PPROF=OFF -DLLVM_LD_ENABLE_DHAT=OFF
           ! grep -E 'LLVM_LD_ENABLE_(PPROF|DHAT):BOOL=ON' build-timing/CMakeCache.txt
+      # GEN-021 verified reuse, SHADOW mode only (zackees/ci.yml#162): on a push to main, report in
+      # the step summary whether this commit's tree is identical to a merged PR head whose ci.yml
+      # run passed every job below. It never skips anything (shadow always sets reuse=false), makes
+      # GET-only API calls, and cannot fail the run (continue-on-error). Last in the job, so the
+      # extra checkout is never seen by the checks above. ci_lint is stdlib only, pinned by SHA.
+      - name: Check out ci-lint (reuse shadow)
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: zackees/ci.yml
+          ref: b93b8c4a20ce3cd476c75a278ad01a31bde2438b
+          path: .ci-lint
+          persist-credentials: false
+      - name: Verified reuse decision (GEN-021, shadow)
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        working-directory: .ci-lint
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python3 -m ci_lint reuse-check --workflow ci.yml --mode shadow
+          --required-job provenance
+          --required-job build-linux
+          --required-job build-linux-cross
+          --required-job test-windows-cross
+          --required-job build-windows
   # Every building job below is the ci-job template over a job in tools/ci_jobs.py (#55, #57); the
   # YAML only installs what needs an action, calls the template and uploads artifacts.
   build-linux:
