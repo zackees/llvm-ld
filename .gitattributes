@@ -1,4 +1,0 @@
-# Vendored payload hashes describe exact upstream archive bytes. Never let a
-# platform checkout rewrite their line endings.
-llvm-project/** -text
-upstream/mimalloc-pprof-0.9.5/** -text
