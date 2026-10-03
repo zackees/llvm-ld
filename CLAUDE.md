@@ -309,6 +309,11 @@ but means a corpus cannot be shared between machines by hash.
   (2048-object fixture, 5 repeats, bootstrap CI) — extend it rather than writing a new harness.
   This override applies to Windows builds only, so the Linux `llvm-ld-direct` used by
   `tests/perf/bench.py` and the `link-benchmark` workflow runs on glibc malloc.
+  Its workflow (`benchmark.yml`, `allocator-benchmark`) runs on a PR only when the PR touches the
+  allocator wiring or the benchmark itself (its `paths:` list), nightly on main when main has moved,
+  and on `workflow_dispatch` for any branch. It costs a ~100-minute cold MSVC build and never gates
+  on the measurement, so it no longer runs on every PR. Add a path to that list if the benchmark
+  starts depending on it.
 
 ## Output-changing optimizations: explicit user opt-in only (#40)
 
