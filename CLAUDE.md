@@ -246,13 +246,32 @@ probe or build fails the job immediately: CI must never retry with `ZCCACHE_DISA
 drop the launcher, because that would hide a zccache regression. zccache's client also
 fails a compile that has not answered in 180 s with exit 113; `ZCCACHE_WEDGE_RECV_TIMEOUT_SECS`
 is raised to 3600 for every job, because instrumented SelectionDAGBuilder.cpp takes longer.
+zccache will not cache a cl/clang-cl compile that names a PDB side output (`/Fd`), and CMake's
+Ninja rule passes `/Fd<target>.pdb` to every such compile, so every Windows and cross compile was
+non-cacheable (PR #48's cross build: 0 hits, 1685 non-cacheable). The root `CMakeLists.txt` drops
+`/Fd` from the rule in Release builds without `/Zi`, where no PDB is written and the object is
+unchanged. LLVM also disables precompiled headers only for sccache/ccache launchers, so under
+zccache PCH came back on and every cl/clang-cl PCH compile was non-cacheable too; the root
+`CMakeLists.txt` (and the standalone tablegen configures) disable PCH under zccache. Check
+`non_cacheable` in a job's zccache stats before assuming a cache works. The intermittent exit 113
+is a compile killed with SIGTERM (-143) inside zccache, reported upstream as zackees/zccache#1603;
+the bypass retry absorbs it.
+
+**Windows is not warm and cannot be, today** (zackees/zccache#1603): the compile cache does not
+persist across runs there. Two consecutive main runs with identical inputs both compiled ~1805 TUs
+with 0 hits, restoring a 35 MB cache that should be GB-sized; the daemon also dies under load
+(`lost connection to daemon`) and mangles `/showIncludes` with clang-cl. `ci-windows` therefore
+takes ~55 min against 18 min on the old sccache setup. Linux is the opposite: `ci-linux` 68 s and
+`ci-linux-cross` 152 s warm on main (run 35489502461), against 7 and 23 min before. Do not
+re-add sccache (owner decision); revisit when the upstream issue closes.
 release.yml (#58) runs `release-corpus` and `release-build`
 (cache group `release-<triple>`) through it too; tags and PRs restore what main saves, and a
 weekly scheduled run on main keeps those caches warm (skipped when main has not moved). The PGO
 builds use an uninstrumented native tablegen (`LLVM_NATIVE_TOOL_DIR`): instrumented, tablegen
 stalled the aarch64 Linux leg for 5.5 h at `Building Options.inc` (run 35443823220). musl legs
 build in Alpine with the host's static zccache binary and cache directory mounted.
-closure-discovery (#59) is next.
+closure-discovery.yml (#59) runs `closure-discover` (group `discover-<triple>`) the same way. No workflow
+builds inline any more (`test_ci_jobs.py` fails on a `cmake --build` in a workflow).
 
 `tools/audit_build.py` resolves and hashes each path once (it used to redo it for all ~1M
 `ninja -t deps` lines: 151 s -> 4 s locally, identical closure output).

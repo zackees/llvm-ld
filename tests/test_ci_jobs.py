@@ -30,8 +30,7 @@ class JobTableTest(unittest.TestCase):
         self.assertEqual(sorted(used - set(ci_jobs.JOBS)), [])
 
     def test_no_workflow_uses_sccache_or_the_old_templates(self):
-        migrated = ("link-benchmark.yml", "ci.yml", "correctness.yml", "benchmark.yml")
-        for workflow in (ROOT / ".github" / "workflows" / name for name in migrated):
+        for workflow in (ROOT / ".github" / "workflows").glob("*.yml"):
             text = workflow.read_text()
             for gone in ("sccache", "zccache-build", "pgo-setup", "record-timing"):
                 self.assertNotIn(gone, text, f"{workflow.name} still mentions {gone}")
@@ -114,7 +113,8 @@ class FloorTest(unittest.TestCase):
     def test_every_build_job_outside_link_benchmark_has_a_floor(self):
         for job in ci_jobs.JOBS.values():
             # link-benchmark has its own floors (bench_floors.json); release legs are rarely warm.
-            if job.cache_group and not job.name.startswith(("bench-", "release-")):
+            # closure-discover is a dispatch-only tool with no baseline to set a floor from.
+            if job.cache_group and not job.name.startswith(("bench-", "release-", "closure-")):
                 self.assertIsNotNone(job.warm_max_minutes, job.name)
 
 
@@ -129,6 +129,19 @@ class ReleaseJobTest(unittest.TestCase):
         self.assertEqual([ci_jobs.release_kind(t) for t in ("x86_64-pc-windows-msvc", "aarch64-unknown-linux-musl",
                                                             "x86_64-apple-darwin", "aarch64-unknown-linux-gnu")],
                          ["windows", "musl", "macos", "linux"])
+
+    def test_discover_script_fills_the_host(self):
+        script = ci_jobs.discover_script("x86_64-apple-darwin")
+        self.assertIn("-DCMAKE_OSX_ARCHITECTURES=x86_64", script)
+        self.assertIn("--output closure-x86_64-apple-darwin.json", script)
+        self.assertIn("{launcher_value}", script)
+        self.assertNotIn("CMAKE_OSX", ci_jobs.discover_script("aarch64-unknown-linux-gnu"))
+
+    def test_every_compiling_workflow_job_uses_the_template(self):
+        for workflow in (ROOT / ".github" / "workflows").glob("*.yml"):
+            # A configure-only check (provenance's timing-configuration guard) compiles nothing.
+            builds = [line for line in workflow.read_text().splitlines() if "cmake --build" in line]
+            self.assertEqual(builds, [], workflow.name)
 
     def test_container_builds_are_never_warm(self):
         job = ci_jobs.Job("t-container", lambda args: setattr(args, "unobserved", True), cache_group="g")
